@@ -27,6 +27,10 @@ revm-primitives.workspace = true
 # Alloy
 alloy-eips.workspace = true
 alloy-sol-types.workspace = true
+alloy-rpc-types = { workspace = true, optional = true }
+
+# rise-pevm
+rise-pevm = { package = "pevm", git = "https://github.com/AshinGau/pevm", branch = "rise_pevm" }
 
 [dev-dependencies]
 reth-testing-utils.workspace = true
@@ -38,3 +42,4 @@ serde_json.workspace = true
 [features]
 default = ["std"]
 std = []
+alloy-compat = ["alloy-rpc-types"]

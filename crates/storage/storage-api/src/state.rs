@@ -11,7 +11,7 @@ use reth_storage_errors::provider::{ProviderError, ProviderResult};
 pub type StateProviderBox = Box<dyn StateProvider>;
 
 /// An abstraction for a type that provides state data.
-#[auto_impl(&, Arc, Box)]
+#[auto_impl(&, &mut, Arc, Box)]
 pub trait StateProvider:
     BlockHashReader + AccountReader + StateRootProvider + StateProofProvider + Send + Sync
 {

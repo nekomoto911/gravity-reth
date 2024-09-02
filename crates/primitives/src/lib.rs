@@ -23,7 +23,7 @@
 extern crate alloc;
 
 #[cfg(feature = "alloy-compat")]
-mod alloy_compat;
+pub mod alloy_compat;
 pub mod basefee;
 mod block;
 #[cfg(feature = "reth-codec")]

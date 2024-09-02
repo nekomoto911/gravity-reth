@@ -309,7 +309,7 @@ reth-ethereum-forks = { path = "crates/ethereum-forks" }
 reth-ethereum-payload-builder = { path = "crates/ethereum/payload" }
 reth-etl = { path = "crates/etl" }
 reth-evm = { path = "crates/evm" }
-reth-evm-ethereum = { path = "crates/ethereum/evm" }
+reth-evm-ethereum = { path = "crates/ethereum/evm", features = ["alloy-compat"] }
 reth-evm-optimism = { path = "crates/optimism/evm" }
 reth-execution-errors = { path = "crates/evm/execution-errors" }
 reth-execution-types = { path = "crates/evm/execution-types" }
@@ -345,8 +345,8 @@ reth-optimism-rpc = { path = "crates/optimism/rpc" }
 reth-payload-builder = { path = "crates/payload/builder" }
 reth-payload-primitives = { path = "crates/payload/primitives" }
 reth-payload-validator = { path = "crates/payload/validator" }
-reth-primitives = { path = "crates/primitives", default-features = false, features = ["std"] }
-reth-primitives-traits = { path = "crates/primitives-traits", default-features = false }
+reth-primitives = { path = "crates/primitives", default-features = false, features = ["std", "alloy-compat"] }
+reth-primitives-traits = { path = "crates/primitives-traits", default-features = false, features = ["alloy-compat"] }
 reth-provider = { path = "crates/storage/provider" }
 reth-prune = { path = "crates/prune/prune" }
 reth-prune-types = { path = "crates/prune/types" }
@@ -385,7 +385,7 @@ revm = { version = "13.0.0", features = [
     "secp256k1",
     "blst",
 ], default-features = false }
-revm-inspectors = "0.5"
+revm-inspectors = "=0.5.6"
 revm-primitives = { version = "8.0.0", features = [
     "std",
 ], default-features = false }

@@ -24,6 +24,9 @@ use alloc::vec::Vec;
 mod config;
 pub use config::{revm_spec, revm_spec_by_timestamp_after_merge};
 
+#[cfg(feature = "alloy-compat")]
+pub mod rise_pevm_adaptor;
+
 pub mod execute;
 
 /// Ethereum DAO hardfork state change data.

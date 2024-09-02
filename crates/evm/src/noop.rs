@@ -9,7 +9,7 @@ use reth_prune_types::PruneModes;
 use reth_storage_errors::provider::ProviderError;
 use revm_primitives::db::Database;
 
-use crate::execute::{BatchExecutor, BlockExecutorProvider, Executor};
+use crate::execute::{BatchExecutor, BlockExecutorProvider, Executor, ParallelDatabase, ParallelExecutor};
 
 const UNAVAILABLE_FOR_NOOP: &str = "execution unavailable for noop";
 
@@ -20,6 +20,8 @@ pub struct NoopBlockExecutorProvider;
 
 impl BlockExecutorProvider for NoopBlockExecutorProvider {
     type Executor<DB: Database<Error: Into<ProviderError> + Display>> = Self;
+
+    type ParallelExecutor<DB: ParallelDatabase<Error: Into<ProviderError> + Display>> = Self;
 
     type BatchExecutor<DB: Database<Error: Into<ProviderError> + Display>> = Self;
 
@@ -39,6 +41,16 @@ impl BlockExecutorProvider for NoopBlockExecutorProvider {
 }
 
 impl<DB> Executor<DB> for NoopBlockExecutorProvider {
+    type Input<'a> = BlockExecutionInput<'a, BlockWithSenders>;
+    type Output = BlockExecutionOutput<Receipt>;
+    type Error = BlockExecutionError;
+
+    fn execute(self, _: Self::Input<'_>) -> Result<Self::Output, Self::Error> {
+        Err(BlockExecutionError::msg(UNAVAILABLE_FOR_NOOP))
+    }
+}
+
+impl<DB> ParallelExecutor<DB> for NoopBlockExecutorProvider {
     type Input<'a> = BlockExecutionInput<'a, BlockWithSenders>;
     type Output = BlockExecutionOutput<Receipt>;
     type Error = BlockExecutionError;

@@ -1,13 +1,18 @@
 //! Ethereum block executor.
 
-use crate::{
-    dao_fork::{DAO_HARDFORK_BENEFICIARY, DAO_HARDKFORK_ACCOUNTS},
-    EthEvmConfig,
-};
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::fmt::Display;
+use std::any::Any;
+#[cfg(feature = "std")]
+use std::sync::Arc;
+
+use revm_primitives::{BlockEnv, CfgEnvWithHandlerCfg, db::{Database, DatabaseCommit, DatabaseRef}, EnvWithHandlerCfg, EVMError, ResultAndState};
+
 use reth_chainspec::{ChainSpec, EthereumHardforks, MAINNET};
 use reth_ethereum_consensus::validate_block_post_execution;
 use reth_evm::{
+    ConfigureEvm,
     execute::{
         BatchExecutor, BlockExecutionError, BlockExecutionInput, BlockExecutionOutput,
         BlockExecutorProvider, BlockValidationError, Executor, ProviderError,
@@ -16,28 +21,20 @@ use reth_evm::{
         apply_beacon_root_contract_call, apply_consolidation_requests_contract_call,
         apply_withdrawal_requests_contract_call,
     },
-    ConfigureEvm,
 };
+use reth_evm::execute::{ParallelDatabase, ParallelExecutor};
 use reth_execution_types::ExecutionOutcome;
-use reth_primitives::{
-    BlockNumber, BlockWithSenders, EthereumHardfork, Header, Receipt, Request, U256,
-};
+use reth_primitives::{B256, BlockNumber, BlockWithSenders, EthereumHardfork, Header, Receipt, Request, U256};
 use reth_prune_types::PruneModes;
 use reth_revm::{
     batch::BlockBatchRecord,
     db::states::bundle_state::BundleRetention,
-    state_change::{apply_blockhashes_update, post_block_balance_increments},
-    Evm, State,
+    Evm,
+    State, state_change::{apply_blockhashes_update, post_block_balance_increments},
 };
-use revm_primitives::{
-    db::{Database, DatabaseCommit},
-    BlockEnv, CfgEnvWithHandlerCfg, EVMError, EnvWithHandlerCfg, ResultAndState,
-};
+use reth_revm::database::{EvmStateProvider, StateProviderDatabase};
 
-#[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
-#[cfg(feature = "std")]
-use std::sync::Arc;
+use crate::{dao_fork::{DAO_HARDFORK_BENEFICIARY, DAO_HARDKFORK_ACCOUNTS}, EthEvmConfig};
 
 /// Provides executors to execute regular ethereum blocks
 #[derive(Debug, Clone)]
@@ -79,6 +76,13 @@ where
             State::builder().with_database(db).with_bundle_update().without_state_clear().build(),
         )
     }
+
+    fn parallel_executor<DB>(&self, db: DB) -> EthPevmExecutor<DB>
+    where
+        DB: ParallelDatabase<Error: Into<ProviderError> + Display>,
+    {
+        EthPevmExecutor::new(db)
+    }
 }
 
 impl<EvmConfig> BlockExecutorProvider for EthExecutorProvider<EvmConfig>
@@ -88,6 +92,9 @@ where
     type Executor<DB: Database<Error: Into<ProviderError> + Display>> =
         EthBlockExecutor<EvmConfig, DB>;
 
+    type ParallelExecutor<DB: ParallelDatabase<Error: Into<ProviderError> + Display>> =
+        EthPevmExecutor<DB>;
+
     type BatchExecutor<DB: Database<Error: Into<ProviderError> + Display>> =
         EthBatchExecutor<EvmConfig, DB>;
 
@@ -96,6 +103,13 @@ where
         DB: Database<Error: Into<ProviderError> + Display>,
     {
         self.eth_executor(db)
+    }
+
+    fn parallel_executor<DB>(&self, db: DB) -> Self::ParallelExecutor<DB>
+    where
+        DB: ParallelDatabase<Error: Into<ProviderError> + Display>
+    {
+        self.parallel_executor(db)
     }
 
     fn batch_executor<DB>(&self, db: DB) -> Self::BatchExecutor<DB>
@@ -178,7 +192,7 @@ where
                 }
                 .into())
             }
-
+    
             self.evm_config.fill_tx_env(evm.tx_mut(), transaction, *sender);
 
             // Execute transaction.
@@ -236,6 +250,43 @@ where
         };
 
         Ok(EthExecuteOutput { receipts, requests, gas_used: cumulative_gas_used })
+    }
+}
+
+#[derive(Debug)]
+pub struct EthPevmExecutor<DB>
+where
+    DB: ParallelDatabase<Error: Into<ProviderError> + Display>
+{
+    database: DB
+}
+
+impl<DB> EthPevmExecutor<DB>
+where
+    DB: ParallelDatabase<Error: Into<ProviderError> + Display>
+{
+    pub const fn new(database: DB) -> Self {
+        Self { database }
+    }
+}
+
+impl<DB> ParallelExecutor<DB> for EthPevmExecutor<DB>
+where
+    DB: ParallelDatabase<Error: Into<ProviderError> + Display>
+{
+    type Input<'a> = BlockExecutionInput<'a, BlockWithSenders>;
+    type Output = BlockExecutionOutput<Receipt>;
+    type Error = BlockExecutionError;
+
+    #[cfg(feature = "alloy-compat")]
+    fn execute(mut self, input: Self::Input<'_>) -> Result<Self::Output, Self::Error> {
+        let BlockExecutionInput { block, total_difficulty } = input;
+        crate::rise_pevm_adaptor::pevm_executor(&self.database, block, total_difficulty)
+    }
+
+    #[cfg(not(feature = "alloy-compat"))]
+    fn execute(mut self, input: Self::Input<'_>) -> Result<Self::Output, Self::Error> {
+        Err(BlockExecutionError::msg("Should turn on alloy-compat to run PEVM"))
     }
 }
 
@@ -464,24 +515,27 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::HashMap;
+
     use alloy_eips::{
         eip2935::HISTORY_STORAGE_ADDRESS,
         eip4788::{BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE, SYSTEM_ADDRESS},
         eip7002::{WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, WITHDRAWAL_REQUEST_PREDEPLOY_CODE},
     };
+    use revm_primitives::{b256, BLOCKHASH_SERVE_WINDOW, Bytes, fixed_bytes};
+    use secp256k1::{Keypair, Secp256k1};
+
     use reth_chainspec::{ChainSpecBuilder, ForkCondition};
     use reth_primitives::{
-        constants::{EMPTY_ROOT_HASH, ETH_TO_WEI},
-        keccak256, public_key_to_address, Account, Block, Transaction, TxKind, TxLegacy, B256,
+        Account,
+        B256, Block, constants::{EMPTY_ROOT_HASH, ETH_TO_WEI}, keccak256, public_key_to_address, Transaction, TxKind, TxLegacy,
     };
     use reth_revm::{
         database::StateProviderDatabase, test_utils::StateProviderTest, TransitionState,
     };
     use reth_testing_utils::generators::{self, sign_tx_with_key_pair};
-    use revm_primitives::{b256, fixed_bytes, Bytes, BLOCKHASH_SERVE_WINDOW};
-    use secp256k1::{Keypair, Secp256k1};
-    use std::collections::HashMap;
+
+    use super::*;
 
     fn create_state_provider_with_beacon_root_contract() -> StateProviderTest {
         let mut db = StateProviderTest::default();

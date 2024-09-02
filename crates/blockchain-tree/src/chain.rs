@@ -11,7 +11,7 @@ use reth_blockchain_tree_api::{
 };
 use reth_consensus::{Consensus, ConsensusError, PostExecutionInput};
 use reth_db_api::database::Database;
-use reth_evm::execute::{BlockExecutionOutput, BlockExecutorProvider, Executor};
+use reth_evm::execute::{BlockExecutionOutput, BlockExecutorProvider, Executor, ParallelExecutor};
 use reth_execution_errors::BlockExecutionError;
 use reth_execution_types::{Chain, ExecutionOutcome};
 use reth_primitives::{
@@ -205,7 +205,7 @@ impl AppendableChain {
         let provider = BundleStateProvider::new(state_provider, bundle_state_data_provider);
 
         let db = StateProviderDatabase::new(&provider);
-        let executor = externals.executor_factory.executor(db);
+        let executor = externals.executor_factory.parallel_executor(db);
         let block_hash = block.hash();
         let block = block.unseal();
 

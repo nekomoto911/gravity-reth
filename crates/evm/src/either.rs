@@ -2,7 +2,7 @@
 
 use core::fmt::Display;
 
-use crate::execute::{BatchExecutor, BlockExecutorProvider, Executor};
+use crate::execute::{BatchExecutor, BlockExecutorProvider, Executor, ParallelDatabase, ParallelExecutor};
 use reth_execution_errors::BlockExecutionError;
 use reth_execution_types::{BlockExecutionInput, BlockExecutionOutput, ExecutionOutcome};
 use reth_primitives::{BlockNumber, BlockWithSenders, Receipt};
@@ -20,6 +20,9 @@ where
 {
     type Executor<DB: Database<Error: Into<ProviderError> + Display>> =
         Either<A::Executor<DB>, B::Executor<DB>>;
+
+    type ParallelExecutor<DB: ParallelDatabase<Error: Into<ProviderError> + Display>> =
+        Either<A::ParallelExecutor<DB>, B::ParallelExecutor<DB>>;
 
     type BatchExecutor<DB: Database<Error: Into<ProviderError> + Display>> =
         Either<A::BatchExecutor<DB>, B::BatchExecutor<DB>>;
@@ -60,6 +63,34 @@ where
         Error = BlockExecutionError,
     >,
     DB: Database<Error: Into<ProviderError> + Display>,
+{
+    type Input<'a> = BlockExecutionInput<'a, BlockWithSenders>;
+    type Output = BlockExecutionOutput<Receipt>;
+    type Error = BlockExecutionError;
+
+    fn execute(self, input: Self::Input<'_>) -> Result<Self::Output, Self::Error> {
+        match self {
+            Self::Left(a) => a.execute(input),
+            Self::Right(b) => b.execute(input),
+        }
+    }
+}
+
+impl<A, B, DB> ParallelExecutor<DB> for Either<A, B>
+where
+    A: for<'a> ParallelExecutor<
+        DB,
+        Input<'a> = BlockExecutionInput<'a, BlockWithSenders>,
+        Output = BlockExecutionOutput<Receipt>,
+        Error = BlockExecutionError,
+    >,
+    B: for<'a> ParallelExecutor<
+        DB,
+        Input<'a> = BlockExecutionInput<'a, BlockWithSenders>,
+        Output = BlockExecutionOutput<Receipt>,
+        Error = BlockExecutionError,
+    >,
+    DB: ParallelDatabase<Error: Into<ProviderError> + Display>,
 {
     type Input<'a> = BlockExecutionInput<'a, BlockWithSenders>;
     type Output = BlockExecutionOutput<Receipt>;

@@ -69,6 +69,8 @@ where
     type Executor<DB: Database<Error: Into<ProviderError> + std::fmt::Display>> =
         OpBlockExecutor<EvmConfig, DB>;
 
+    type ParallelExecutor<DB: ParallelDatabase<Error: Into<ProviderError> + Display>> = ();
+
     type BatchExecutor<DB: Database<Error: Into<ProviderError> + std::fmt::Display>> =
         OpBatchExecutor<EvmConfig, DB>;
     fn executor<DB>(&self, db: DB) -> Self::Executor<DB>

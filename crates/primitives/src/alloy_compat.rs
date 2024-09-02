@@ -1,15 +1,43 @@
 //! Common conversions from alloy types.
 
-use crate::{
-    constants::EMPTY_TRANSACTIONS, transaction::extract_chain_id, Block, Signature, Transaction,
-    TransactionSigned, TransactionSignedEcRecovered, TransactionSignedNoHash, TxEip1559, TxEip2930,
-    TxEip4844, TxLegacy, TxType,
-};
-use alloy_primitives::TxKind;
-use alloy_rlp::Error as RlpError;
-
 #[cfg(not(feature = "std"))]
 use alloc::{string::ToString, vec::Vec};
+
+use alloy_primitives::TxKind;
+use alloy_rlp::{Encodable, Error as RlpError};
+
+use crate::{Block, BlockWithSenders, constants::EMPTY_TRANSACTIONS, Signature, Transaction,
+            transaction::extract_chain_id, TransactionSigned, TransactionSignedEcRecovered,
+            TransactionSignedNoHash, TxEip1559, TxEip2930, TxEip4844, TxEip7702, TxLegacy, TxType,
+};
+
+impl TryFrom<BlockWithSenders> for alloy_rpc_types::Block {
+    type Error = alloy_rpc_types::ConversionError;
+
+    fn try_from(block: BlockWithSenders) -> Result<Self, Self::Error> {
+        use alloy_rpc_types::ConversionError;
+
+        let mut transactions: Vec<alloy_rpc_types::Transaction> = vec![];
+        let BlockWithSenders { block, senders } = block;
+        let Block { header, body, withdrawals, .. } = block;
+        if body.len() != senders.len() {
+            return Err(ConversionError::Custom(String::from("not enough senders")));
+        }
+        for (tx, senders) in body.into_iter().zip(senders.into_iter()) {
+            let mut tx: alloy_rpc_types::Transaction = tx.try_into()?;
+            tx.from = senders;
+            transactions.push(tx);
+        }
+
+        Ok(Self {
+            header: header.try_into()?,
+            transactions: alloy_rpc_types::BlockTransactions::Full(transactions),
+            uncles: vec![], // why can't from ommers
+            withdrawals: withdrawals.map(|wd| { wd.into_inner() }),
+            ..Default::default()
+        })
+    }
+}
 
 impl TryFrom<alloy_rpc_types::Block> for Block {
     type Error = alloy_rpc_types::ConversionError;
@@ -64,6 +92,116 @@ impl TryFrom<alloy_rpc_types::Block> for Block {
     }
 }
 
+impl TryFrom<Transaction> for alloy_rpc_types::Transaction {
+    type Error = alloy_rpc_types::ConversionError;
+
+    fn try_from(tx: Transaction) -> Result<Self, Self::Error> {
+        use alloy_rpc_types::ConversionError;
+
+        match tx {
+            Transaction::Legacy(TxLegacy { chain_id, nonce, gas_price, gas_limit, to, value, input }) => {
+                Ok(Self {
+                    transaction_type: Some(TxType::Legacy.into()),
+                    chain_id,
+                    nonce,
+                    gas_price: Some(gas_price),
+                    gas: gas_limit.into(),
+                    to: to.to().map(|address| { *address }),
+                    value,
+                    input,
+                    ..Default::default()
+                })
+            }
+            Transaction::Eip2930(TxEip2930 { chain_id, nonce, gas_price, gas_limit, to, value, access_list, input }) => {
+                Ok(Self {
+                    transaction_type: Some(TxType::Eip2930.into()),
+                    chain_id: Some(chain_id),
+                    nonce,
+                    gas_price: Some(gas_price),
+                    gas: gas_limit.into(),
+                    to: to.to().map(|address| { *address }),
+                    value,
+                    access_list: Some(access_list),
+                    input,
+                    ..Default::default()
+                })
+            }
+            Transaction::Eip1559(TxEip1559 { chain_id, nonce, gas_limit, max_fee_per_gas, max_priority_fee_per_gas, to, value, access_list, input }) => {
+                Ok(Self {
+                    transaction_type: Some(TxType::Eip1559.into()),
+                    chain_id: Some(chain_id),
+                    nonce,
+                    gas: gas_limit.into(),
+                    max_fee_per_gas: Some(max_fee_per_gas),
+                    max_priority_fee_per_gas: Some(max_priority_fee_per_gas),
+                    to: to.to().map(|address| { *address }),
+                    value,
+                    access_list: Some(access_list),
+                    input,
+                    ..Default::default()
+                })
+            }
+            Transaction::Eip4844(TxEip4844 { chain_id, nonce, gas_limit, max_fee_per_gas, max_priority_fee_per_gas, placeholder: _placeholder, to, value, access_list, blob_versioned_hashes, max_fee_per_blob_gas, input }) => {
+                Ok(Self {
+                    transaction_type: Some(TxType::Eip4844.into()),
+                    chain_id: Some(chain_id),
+                    nonce,
+                    gas: gas_limit.into(),
+                    max_fee_per_gas: Some(max_fee_per_gas),
+                    max_priority_fee_per_gas: Some(max_priority_fee_per_gas),
+                    to: Some(to),
+                    value,
+                    access_list: Some(access_list),
+                    blob_versioned_hashes: Some(blob_versioned_hashes),
+                    max_fee_per_blob_gas: Some(max_fee_per_blob_gas),
+                    input,
+                    ..Default::default()
+                })
+            }
+            Transaction::Eip7702(TxEip7702 { chain_id, nonce, gas_limit, max_fee_per_gas, max_priority_fee_per_gas, to, value, access_list, authorization_list, input }) => {
+                Ok(Self {
+                    transaction_type: Some(TxType::Eip7702.into()),
+                    chain_id: Some(chain_id),
+                    nonce,
+                    gas: gas_limit.into(),
+                    max_fee_per_gas: Some(max_fee_per_gas),
+                    max_priority_fee_per_gas: Some(max_priority_fee_per_gas),
+                    to: to.to().map(|address| { *address }),
+                    value,
+                    access_list: Some(access_list),
+                    authorization_list: Some(authorization_list),
+                    input,
+                    ..Default::default()
+                })
+            }
+            #[cfg(feature = "optimism")]
+            Transaction::Deposit(crate::transaction::TxDeposit { source_hash, from, to, mint, value, gas_limit, is_system_transaction, input }) => {
+                let mut other_fields = std::collections::BTreeMap::new();
+                other_fields.insert(String::from("source_hash"),
+                                    serde_json::to_value(source_hash)
+                                        .map_err(|e| { ConversionError::Custom(e.to_string()) })?);
+                if Some(mint) = mint {
+                    other_fields.insert(String::from("mint"),
+                                        serde_json::to_value(mint)
+                                            .map_err(|e| { ConversionError::Custom(e.to_string()) })?);
+                }
+                other_fields.insert(String::from("is_system_tx"),
+                                    serde_json::to_value(is_system_transaction)
+                                        .map_err(|e| { ConversionError::Custom(e.to_string()) })?);
+                Ok(Self {
+                    transaction_type: Some(TxType::Deposit.into()),
+                    from,
+                    to: to.to().map(|address| { *address }),
+                    value,
+                    gas: gas_limit.into(),
+                    input,
+                    ..Default::default()
+                })
+            }
+        }
+    }
+}
+
 impl TryFrom<alloy_rpc_types::Transaction> for Transaction {
     type Error = alloy_rpc_types::ConversionError;
 
@@ -82,7 +220,7 @@ impl TryFrom<alloy_rpc_types::Transaction> for Transaction {
                     return Err(ConversionError::Eip2718Error(
                         RlpError::Custom("EIP-1559 fields are present in a legacy transaction")
                             .into(),
-                    ))
+                    ));
                 }
 
                 // extract the chain id if possible
@@ -98,7 +236,7 @@ impl TryFrom<alloy_rpc_types::Transaction> for Transaction {
                                 .map_err(|err| ConversionError::Eip2718Error(err.into()))?
                                 .1
                         } else {
-                            return Err(ConversionError::MissingChainId)
+                            return Err(ConversionError::MissingChainId);
                         }
                     }
                 };
@@ -235,6 +373,26 @@ impl TryFrom<alloy_rpc_types::Transaction> for Transaction {
     }
 }
 
+impl TryFrom<TransactionSigned> for alloy_rpc_types::Transaction {
+    type Error = alloy_rpc_types::ConversionError;
+
+    fn try_from(tx: TransactionSigned) -> Result<Self, Self::Error> {
+        let odd = if tx.signature.odd_y_parity { 1 } else { 0 };
+        Ok(Self {
+            hash: tx.hash,
+            signature: Some(alloy_rpc_types::Signature {
+                r: tx.signature.r,
+                s: tx.signature.s,
+                v: alloy_primitives::U256::from(tx.chain_id()
+                    .map(|chain_id| { chain_id * 2 + 35 + odd })
+                    .unwrap_or(27 + odd)),
+                y_parity: Some(alloy_rpc_types::Parity(tx.signature.odd_y_parity)),
+            }),
+            ..tx.transaction.try_into()?
+        })
+    }
+}
+
 impl TryFrom<alloy_rpc_types::Transaction> for TransactionSigned {
     type Error = alloy_rpc_types::ConversionError;
 
@@ -310,10 +468,11 @@ impl TryFrom<alloy_rpc_types::Transaction> for TransactionSignedNoHash {
 #[cfg(test)]
 #[cfg(feature = "optimism")]
 mod tests {
-    use super::*;
     use alloy_primitives::{B256, U256};
     use alloy_rpc_types::Transaction as AlloyTransaction;
     use revm_primitives::{address, Address};
+
+    use super::*;
 
     #[test]
     fn optimism_deposit_tx_conversion_no_mint() {

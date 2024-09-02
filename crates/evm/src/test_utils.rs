@@ -1,8 +1,6 @@
 //! Helpers for testing.
 
-use crate::execute::{
-    BatchExecutor, BlockExecutionInput, BlockExecutionOutput, BlockExecutorProvider, Executor,
-};
+use crate::execute::{BatchExecutor, BlockExecutionInput, BlockExecutionOutput, BlockExecutorProvider, Executor, ParallelDatabase};
 use parking_lot::Mutex;
 use reth_execution_errors::BlockExecutionError;
 use reth_execution_types::ExecutionOutcome;
@@ -27,6 +25,8 @@ impl MockExecutorProvider {
 
 impl BlockExecutorProvider for MockExecutorProvider {
     type Executor<DB: Database<Error: Into<ProviderError> + Display>> = Self;
+
+    type ParallelExecutor<DB: ParallelDatabase<Error: Into<ProviderError> + Display>> = ();
 
     type BatchExecutor<DB: Database<Error: Into<ProviderError> + Display>> = Self;
 

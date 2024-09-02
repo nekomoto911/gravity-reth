@@ -9,7 +9,11 @@ use core::fmt::Display;
 
 use reth_primitives::{BlockNumber, BlockWithSenders, Receipt};
 use reth_prune_types::PruneModes;
-use revm_primitives::db::Database;
+use revm_primitives::db::{Database, DatabaseRef};
+
+pub trait ParallelDatabase: DatabaseRef + Send + Sync { }
+
+impl<T: DatabaseRef + Send + Sync> ParallelDatabase for T { }
 
 /// A general purpose executor trait that executes an input (e.g. block) and produces an output
 /// (e.g. state changes and receipts).
@@ -30,6 +34,18 @@ pub trait Executor<DB> {
     /// [`BatchExecutor`].
     ///
     /// # Returns
+    /// The output of the block execution.
+    fn execute(self, input: Self::Input<'_>) -> Result<Self::Output, Self::Error>;
+}
+
+pub trait ParallelExecutor<DB> {
+    /// The input type for the executor.
+    type Input<'a>;
+    /// The output type for the executor.
+    type Output;
+    /// The error type returned by the executor.
+    type Error;
+
     /// The output of the block execution.
     fn execute(self, input: Self::Input<'_>) -> Result<Self::Output, Self::Error>;
 }
@@ -114,6 +130,13 @@ pub trait BlockExecutorProvider: Send + Sync + Clone + Unpin + 'static {
         Error = BlockExecutionError,
     >;
 
+    type ParallelExecutor<DB: ParallelDatabase<Error: Into<ProviderError> + Display>>: for<'a> ParallelExecutor<
+        DB,
+        Input<'a> = BlockExecutionInput<'a, BlockWithSenders>,
+        Output = BlockExecutionOutput<Receipt>,
+        Error = BlockExecutionError,
+    >;
+
     /// An executor that can execute a batch of blocks given a database.
     type BatchExecutor<DB: Database<Error: Into<ProviderError> + Display>>: for<'a> BatchExecutor<
         DB,
@@ -128,6 +151,13 @@ pub trait BlockExecutorProvider: Send + Sync + Clone + Unpin + 'static {
     fn executor<DB>(&self, db: DB) -> Self::Executor<DB>
     where
         DB: Database<Error: Into<ProviderError> + Display>;
+
+    fn parallel_executor<DB>(&self, _db: DB) -> Self::ParallelExecutor<DB>
+    where
+        DB: ParallelDatabase<Error: Into<ProviderError> + Display>
+    {
+        panic!("not implemented")
+    }
 
     /// Creates a new batch executor with the given database and pruning modes.
     ///
@@ -151,6 +181,7 @@ mod tests {
 
     impl BlockExecutorProvider for TestExecutorProvider {
         type Executor<DB: Database<Error: Into<ProviderError> + Display>> = TestExecutor<DB>;
+        type ParallelExecutor<DB: ParallelDatabase<Error: Into<ProviderError> + Display>> = ();
         type BatchExecutor<DB: Database<Error: Into<ProviderError> + Display>> = TestExecutor<DB>;
 
         fn executor<DB>(&self, _db: DB) -> Self::Executor<DB>
