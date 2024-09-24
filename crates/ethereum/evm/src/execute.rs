@@ -2,6 +2,8 @@
 
 use crate::{
     dao_fork::{DAO_HARDFORK_BENEFICIARY, DAO_HARDKFORK_ACCOUNTS},
+    debug_ext::DEBUG_EXT,
+    parallel_execute::GrevmExecutorProvider,
     EthEvmConfig,
 };
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
@@ -14,7 +16,6 @@ use reth_evm::{
         BlockExecutorProvider, BlockValidationError, Executor, ProviderError,
     },
     system_calls::{
-        apply_beacon_root_contract_call, apply_blockhashes_contract_call,
         apply_consolidation_requests_contract_call, apply_withdrawal_requests_contract_call,
     },
     ConfigureEvm,
@@ -35,7 +36,7 @@ use reth_revm::{
 };
 use revm_primitives::{
     db::{Database, DatabaseCommit},
-    BlockEnv, CfgEnvWithHandlerCfg, EnvWithHandlerCfg, ResultAndState,
+    BlockEnv, CfgEnvWithHandlerCfg, EnvWithHandlerCfg, ResultAndState, TxEnv,
 };
 use std::collections::hash_map::Entry;
 
@@ -91,6 +92,8 @@ where
     type BatchExecutor<DB: Database<Error: Into<ProviderError> + Display>> =
         EthBatchExecutor<EvmConfig, DB>;
 
+    type ParallelProvider<'a> = GrevmExecutorProvider<'a, EvmConfig>;
+
     fn executor<DB>(&self, db: DB) -> Self::Executor<DB>
     where
         DB: Database<Error: Into<ProviderError> + Display>,
@@ -105,14 +108,22 @@ where
         let executor = self.eth_executor(db);
         EthBatchExecutor { executor, batch_record: BlockBatchRecord::default() }
     }
+
+    fn try_into_parallel_provider<'a>(&self) -> Option<Self::ParallelProvider<'_>> {
+        if DEBUG_EXT.disable_grevm {
+            None
+        } else {
+            Some(GrevmExecutorProvider::new(&self.chain_spec, &self.evm_config))
+        }
+    }
 }
 
 /// Helper type for the output of executing a block.
 #[derive(Debug, Clone)]
-struct EthExecuteOutput {
-    receipts: Vec<Receipt>,
-    requests: Vec<Request>,
-    gas_used: u64,
+pub(super) struct EthExecuteOutput {
+    pub receipts: Vec<Receipt>,
+    pub requests: Vec<Request>,
+    pub gas_used: u64,
 }
 
 /// Helper container type for EVM with chain spec.
@@ -147,24 +158,6 @@ where
         DB: Database,
         DB::Error: Into<ProviderError> + Display,
     {
-        // apply pre execution changes
-        apply_beacon_root_contract_call(
-            &self.evm_config,
-            &self.chain_spec,
-            block.timestamp,
-            block.number,
-            block.parent_beacon_block_root,
-            &mut evm,
-        )?;
-        apply_blockhashes_contract_call(
-            &self.evm_config,
-            &self.chain_spec,
-            block.timestamp,
-            block.number,
-            block.parent_hash,
-            &mut evm,
-        )?;
-
         // execute transactions
         let mut cumulative_gas_used = 0;
         let mut receipts = Vec::with_capacity(block.body.len());
@@ -177,13 +170,13 @@ where
                     transaction_gas_limit: transaction.gas_limit(),
                     block_available_gas,
                 }
-                .into())
+                .into());
             }
 
             self.evm_config.fill_tx_env(evm.tx_mut(), transaction, *sender);
 
             // Execute transaction.
-            let ResultAndState { result, state } = evm.transact().map_err(move |err| {
+            let ResultAndState { result, state, .. } = evm.transact().map_err(move |err| {
                 let new_err = err.map_db_err(|e| e.into());
                 // Ensure hash is calculated for error log, if not already done
                 BlockValidationError::EVM {
@@ -308,6 +301,29 @@ where
             let evm = self.executor.evm_config.evm_with_env(&mut self.state, env);
             self.executor.execute_state_transitions(block, evm)
         }?;
+
+        if DEBUG_EXT.dump_block_env {
+            let env = self.evm_env_for_block(&block.header, total_difficulty);
+            let mut txs = vec![TxEnv::default(); block.body.len()];
+            for (tx_env, (sender, tx)) in txs.iter_mut().zip(block.transactions_with_sender()) {
+                self.executor.evm_config.fill_tx_env(tx_env, tx, *sender);
+            }
+            if let Err(err) = crate::debug_ext::dump_block_env(
+                &env,
+                &txs,
+                &self.state.cache,
+                self.state.transition_state.as_ref().unwrap(),
+                &self.state.block_hashes,
+            ) {
+                eprintln!("Failed to dump block data: {err}");
+            }
+        }
+
+        if DEBUG_EXT.dump_receipts {
+            if let Err(err) = crate::debug_ext::dump_receipts(block.number, &output.receipts) {
+                eprintln!("Failed to dump receipts: {err}");
+            }
+        }
 
         // 3. apply post execution changes
         self.post_execution(block, total_difficulty)?;

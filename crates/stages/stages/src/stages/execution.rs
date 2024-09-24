@@ -4,7 +4,7 @@ use reth_config::config::ExecutionConfig;
 use reth_db::{static_file::HeaderMask, tables};
 use reth_db_api::{cursor::DbCursorRO, transaction::DbTx};
 use reth_evm::{
-    execute::{BatchExecutor, BlockExecutorProvider},
+    execute::{BlockExecutorProvider, EitherBatchExecutor, ParallelExecutorProvider},
     metrics::ExecutorMetrics,
 };
 use reth_execution_types::{Chain, ExecutionOutcome};
@@ -222,7 +222,12 @@ where
             provider.tx_ref(),
             provider.static_file_provider(),
         ));
-        let mut executor = self.executor_provider.batch_executor(db);
+        let mut executor =
+            if let Some(parallel_provider) = self.executor_provider.try_into_parallel_provider() {
+                EitherBatchExecutor::Parallel(parallel_provider.batch_executor(Arc::new(db)))
+            } else {
+                EitherBatchExecutor::Sequential(self.executor_provider.batch_executor(db))
+            };
         executor.set_tip(max_block);
         executor.set_prune_modes(prune_modes);
 
@@ -326,7 +331,7 @@ where
         let write_preparation_duration = time.elapsed();
 
         // log the gas per second for the range we just executed
-        debug!(
+        info!(
             target: "sync::stages::execution",
             start = start_block,
             end = stage_progress,

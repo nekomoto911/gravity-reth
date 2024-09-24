@@ -377,6 +377,7 @@ reth-provider = { path = "crates/storage/provider" }
 reth-prune = { path = "crates/prune/prune" }
 reth-prune-types = { path = "crates/prune/types" }
 reth-revm = { path = "crates/revm" }
+reth-grevm = { package = "grevm", git = "ssh://git@github.com/Galxe/grevm.git", rev = "f40762c" }
 reth-rpc = { path = "crates/rpc/rpc" }
 reth-rpc-api = { path = "crates/rpc/rpc-api" }
 reth-rpc-api-testing-util = { path = "crates/rpc/rpc-testing-util" }
@@ -406,13 +407,14 @@ reth-trie-db = { path = "crates/trie/db" }
 reth-trie-parallel = { path = "crates/trie/parallel" }
 
 # revm
-revm = { version = "14.0.1", features = [
+revm = { package = "revm", git = "https://github.com/galxe/revm", rev = "20b5883", features = [
     "std",
     "secp256k1",
     "blst",
+    "serde",
 ], default-features = false }
-revm-inspectors = "0.7"
-revm-primitives = { version = "9.0.2", features = [
+revm-inspectors = { git = "https://github.com/galxe/revm-inspectors", rev = "a9a024e" }
+revm-primitives = { package = "revm-primitives", git = "https://github.com/galxe/revm", rev = "20b5883", features = [
     "std",
 ], default-features = false }
 

@@ -11,7 +11,7 @@ use reth_blockchain_tree_api::{
     BlockAttachment, BlockValidationKind,
 };
 use reth_consensus::{Consensus, ConsensusError, PostExecutionInput};
-use reth_evm::execute::{BlockExecutorProvider, Executor};
+use reth_evm::execute::{BlockExecutorProvider, Executor, ParallelExecutorProvider};
 use reth_execution_errors::BlockExecutionError;
 use reth_execution_types::{Chain, ExecutionOutcome};
 use reth_primitives::{ForkBlock, GotExpected, SealedBlockWithSenders, SealedHeader};
@@ -203,11 +203,17 @@ impl AppendableChain {
         let provider = BundleStateProvider::new(state_provider, bundle_state_data_provider);
 
         let db = StateProviderDatabase::new(&provider);
-        let executor = externals.executor_factory.executor(db);
         let block_hash = block.hash();
         let block = block.unseal();
 
-        let state = executor.execute((&block, U256::MAX).into())?;
+        let state = if let Some(parallel_provider) =
+            externals.executor_factory.try_into_parallel_provider()
+        {
+            parallel_provider.executor(db).execute((&block, U256::MAX).into())?
+        } else {
+            externals.executor_factory.executor(db).execute((&block, U256::MAX).into())?
+        };
+
         externals.consensus.validate_block_post_execution(
             &block,
             PostExecutionInput::new(&state.receipts, &state.requests),
@@ -241,7 +247,7 @@ impl AppendableChain {
                 return Err(ConsensusError::BodyStateRootDiff(
                     GotExpected { got: state_root, expected: block.state_root }.into(),
                 )
-                .into())
+                .into());
             }
 
             tracing::debug!(

@@ -2,7 +2,10 @@
 
 use core::fmt::Display;
 
-use crate::execute::{BatchExecutor, BlockExecutorProvider, Executor};
+use crate::{
+    execute::{BatchExecutor, BlockExecutorProvider, Executor},
+    noop::NoopBlockExecutorProvider,
+};
 use reth_execution_errors::BlockExecutionError;
 use reth_execution_types::{BlockExecutionInput, BlockExecutionOutput, ExecutionOutcome};
 use reth_primitives::{BlockNumber, BlockWithSenders, Receipt};
@@ -23,6 +26,8 @@ where
 
     type BatchExecutor<DB: Database<Error: Into<ProviderError> + Display>> =
         Either<A::BatchExecutor<DB>, B::BatchExecutor<DB>>;
+
+    type ParallelProvider<'a> = NoopBlockExecutorProvider;
 
     fn executor<DB>(&self, db: DB) -> Self::Executor<DB>
     where
@@ -59,7 +64,6 @@ where
         Output = BlockExecutionOutput<Receipt>,
         Error = BlockExecutionError,
     >,
-    DB: Database<Error: Into<ProviderError> + Display>,
 {
     type Input<'a> = BlockExecutionInput<'a, BlockWithSenders>;
     type Output = BlockExecutionOutput<Receipt>;
