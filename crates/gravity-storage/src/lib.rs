@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use reth_primitives::B256;
 use reth_storage_api::errors::provider::ProviderError;
+use reth_trie::updates::TrieUpdates;
 use revm::db::BundleState;
 use reth_revm::Database;
 
@@ -19,5 +20,7 @@ pub trait GravityStorage : Send + Sync {
     async fn get_block_hash_by_block_number(&self, block_number:u64) -> B256;
 
     async fn update_canonical(&mut self, block_number: u64); // gc
+
+    async fn state_root_with_updates(&self, block_number: u64, bundle_state: BundleState) -> (B256, TrieUpdates);
 }
 

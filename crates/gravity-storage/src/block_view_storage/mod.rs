@@ -3,6 +3,7 @@ use reth_payload_builder::database::CachedReads;
 use reth_primitives::{revm_primitives::Bytecode, Address, B256, U256};
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{errors::provider::ProviderError, StateProviderBox, StateProviderFactory};
+use reth_trie::{updates::TrieUpdates, HashedPostState};
 use revm::{db::BundleState, primitives::AccountInfo, Database, DatabaseRef};
 use tokio::{sync::Mutex, time::{sleep, Duration}};
 use std::{
@@ -14,11 +15,11 @@ use crate::GravityStorage;
 use tracing::debug;
 
 pub struct BlockViewStorage<Client> {
-    inner: Mutex<BlockViewStorageInner<Client>>,
+    client: Client,
+    inner: Mutex<BlockViewStorageInner>,
 }
 
-pub struct BlockViewStorageInner<Client> {
-    client: Client,
+pub struct BlockViewStorageInner {
     state_provider_info: (B256, u64), // (block_hash, block_number),
     block_number_to_view: BTreeMap<u64, Arc<CachedReads>>,
     block_number_to_hash: BTreeMap<u64, B256>,
@@ -59,15 +60,15 @@ async fn get_state_provider<Client: StateProviderFactory>(
 impl<Client: StateProviderFactory> BlockViewStorage<Client> {
     fn new(client: Client, block_number: u64, block_hash: B256) -> Self {
         Self {
-            inner: Mutex::new(BlockViewStorageInner::new(client, block_number, block_hash)),
+            client: client,
+            inner: Mutex::new(BlockViewStorageInner::new(block_number, block_hash)),
         }
     }
 }
 
-impl<Client: StateProviderFactory> BlockViewStorageInner<Client> {
-    fn new(client: Client, block_number: u64, block_hash: B256) -> Self {
+impl BlockViewStorageInner {
+    fn new(block_number: u64, block_hash: B256) -> Self {
         Self {
-            client: client,
             state_provider_info: (block_hash, block_number),
             block_number_to_view: BTreeMap::new(),
             block_number_to_hash: BTreeMap::new(),
@@ -79,26 +80,30 @@ impl<Client: StateProviderFactory> BlockViewStorageInner<Client> {
 #[async_trait]
 impl<Client: StateProviderFactory> GravityStorage for BlockViewStorage<Client> {
     async fn get_state_view(&self, target_block_number: u64) -> (B256, Arc<dyn Database<Error = ProviderError>>) {
+        let mut block_views = vec![];
+        let mut block_id = B256::ZERO;
+        let mut block_hash;
         loop {
             {
                 let storage = self.inner.lock().await;
-                match storage.block_number_to_view.get(&target_block_number) {
-                    Some(_) => break,
-                    None => {},
+                block_hash = storage.state_provider_info.0;
+                if storage.block_number_to_view.get(&target_block_number).is_some() {
+                    storage.block_number_to_view.iter().rev().for_each(|(block_number, block_view)| {
+                        let block_number = *block_number;
+                        if storage.state_provider_info.1 < block_number && block_number <= target_block_number {
+                            block_views.push(block_view.clone());
+                        }
+                    });
+                    block_id = *storage.block_number_to_id.get(&target_block_number).unwrap();
+                    block_hash = storage.state_provider_info.0;
+                    break;
+                } else if target_block_number == storage.state_provider_info.1 {
+                    break;
                 }
             }
             sleep(Duration::from_millis(100)).await;
         }
-        let storage = self.inner.lock().await;
-        let mut block_views = vec![];
-        storage.block_number_to_view.iter().rev().for_each(|(block_number, block_view)| {
-            let block_number = *block_number;
-            if storage.state_provider_info.1 < block_number && block_number <= target_block_number {
-                block_views.push(block_view.clone());
-            }
-        });
-        let block_id = *storage.block_number_to_id.get(&target_block_number).unwrap();
-        (block_id, Arc::new(BlockViewProvider::new(block_views, get_state_provider(&storage.client, storage.state_provider_info.0).await)))
+        (block_id, Arc::new(BlockViewProvider::new(block_views, get_state_provider(&self.client, block_hash).await)))
     }
 
     async fn commit_state(&mut self, block_id: B256, block_number: u64, bundle_state: BundleState) {
@@ -144,6 +149,13 @@ impl<Client: StateProviderFactory> GravityStorage for BlockViewStorage<Client> {
         storage.block_number_to_view.remove(&gc_block_number);
         storage.block_number_to_hash.remove(&gc_block_number);
         storage.block_number_to_id.remove(&gc_block_number);
+    }
+
+    async fn state_root_with_updates(&self, block_number: u64, bundle_state: BundleState) -> (B256, TrieUpdates) {
+        let block_hash = self.get_block_hash_by_block_number(block_number).await;
+        let state_provider = get_state_provider(&self.client, block_hash).await;
+        let hashed_state = HashedPostState::from_bundle_state(&bundle_state.state);
+        state_provider.state_root_with_updates(hashed_state).unwrap()
     }
 }
 
