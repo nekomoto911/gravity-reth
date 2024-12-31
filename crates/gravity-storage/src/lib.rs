@@ -32,20 +32,18 @@ impl std::fmt::Display for GravityStorageError {
     }
 }
 
-pub type Result<T> = std::result::Result<T, GravityStorageError>;
-
 #[async_trait]
 pub trait GravityStorage: Send + Sync + 'static {
     async fn get_state_view(
         &self,
         block_number: u64,
-    ) -> Result<(B256, Arc<dyn DatabaseRef<Error = ProviderError>>)>;
+    ) -> Result<(B256, Arc<dyn DatabaseRef<Error = ProviderError>>), GravityStorageError>;
 
     async fn commit_state(&self, block_id: B256, block_number: u64, bundle_state: &BundleState);
 
     async fn insert_block_hash(&self, block_number: u64, block_hash: B256);
 
-    async fn block_hash_by_number(&self, block_number: u64) -> Result<B256>;
+    async fn block_hash_by_number(&self, block_number: u64) -> Result<B256, GravityStorageError>;
 
     async fn update_canonical(&self, block_number: u64); // gc
 
@@ -53,5 +51,5 @@ pub trait GravityStorage: Send + Sync + 'static {
         &self,
         block_number: u64,
         bundle_state: &BundleState,
-    ) -> Result<(B256, TrieUpdates)>;
+    ) -> Result<(B256, TrieUpdates), GravityStorageError>;
 }

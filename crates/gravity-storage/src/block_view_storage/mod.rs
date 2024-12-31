@@ -11,7 +11,7 @@ use tokio::{
     time::{sleep, Duration},
 };
 
-use crate::{GravityStorage, GravityStorageError, Result};
+use crate::{GravityStorage, GravityStorageError};
 use tracing::debug;
 
 pub struct BlockViewStorage<Client> {
@@ -22,6 +22,8 @@ pub struct BlockViewStorage<Client> {
 struct BlockViewStorageInner {
     state_provider_info: (B256, u64), // (block_hash, block_number),
     block_number_to_view: BTreeMap<u64, Arc<CachedReads>>,
+    block_number_to_state: BTreeMap<u64, HashedPostState>,
+    block_number_to_trip_updates: BTreeMap<u64, TrieUpdates>,
     block_number_to_hash: BTreeMap<u64, B256>,
     block_number_to_id: BTreeMap<u64, B256>,
 }
@@ -29,7 +31,7 @@ struct BlockViewStorageInner {
 fn get_state_provider<Client: StateProviderFactory + 'static>(
     client: &Client,
     block_hash: B256,
-) -> Result<StateProviderBox> {
+) -> Result<StateProviderBox, GravityStorageError> {
     let state_provider = client.state_by_block_hash(block_hash);
 
     match state_provider {
@@ -49,6 +51,8 @@ impl BlockViewStorageInner {
         let mut res = Self {
             state_provider_info: (block_hash, block_number),
             block_number_to_view: BTreeMap::new(),
+            block_number_to_state: BTreeMap::new(),
+            block_number_to_trip_updates: BTreeMap::new(),
             block_number_to_hash: BTreeMap::new(),
             block_number_to_id: BTreeMap::new(),
         };
@@ -62,7 +66,7 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
     async fn get_state_view(
         &self,
         target_block_number: u64,
-    ) -> Result<(B256, Arc<dyn DatabaseRef<Error = ProviderError>>)> {
+    ) -> Result<(B256, Arc<dyn DatabaseRef<Error = ProviderError>>), GravityStorageError> {
         let storage = self.inner.lock().await;
         if target_block_number == storage.state_provider_info.1 {
             return Ok((
@@ -107,6 +111,7 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
         }
         let mut storage = self.inner.lock().await;
         storage.block_number_to_view.insert(block_number, Arc::new(cached));
+        storage.block_number_to_state.insert(block_number, HashedPostState::from_bundle_state(&bundle_state.state));
         storage.block_number_to_id.insert(block_number, block_id);
     }
 
@@ -115,7 +120,7 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
         storage.block_number_to_hash.insert(block_number, block_hash);
     }
 
-    async fn block_hash_by_number(&self, block_number: u64) -> Result<B256> {
+    async fn block_hash_by_number(&self, block_number: u64) -> Result<B256, GravityStorageError> {
         let storage = self.inner.lock().await;
         match storage.block_number_to_hash.get(&block_number) {
             Some(block_hash) => Ok(*block_hash),
@@ -138,7 +143,7 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
         &self,
         block_number: u64,
         bundle_state: &BundleState,
-    ) -> Result<(B256, TrieUpdates)> {
+    ) -> Result<(B256, TrieUpdates), GravityStorageError> {
         let block_hash = self.block_hash_by_number(block_number - 1).await?;
         let state_provider = get_state_provider(&self.client, block_hash)?;
         let hashed_state = HashedPostState::from_bundle_state(&bundle_state.state);
