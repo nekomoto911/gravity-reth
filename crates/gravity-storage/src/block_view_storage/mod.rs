@@ -86,7 +86,7 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
 
         let block_id = *storage.block_number_to_id.get(&target_block_number).unwrap();
         let block_number_to_id = storage.block_number_to_id.clone();
-        let block_views: Vec<_> = if target_block_number > base_block_hash {
+        let block_views: Vec<_> = if target_block_number > base_block_number {
             storage
                 .block_number_to_view
                 .range(base_block_number + 1..=target_block_number)
