@@ -244,7 +244,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             trie: trie_output,
         })
         .await;
-        self.storage.update_canonical(block_number, block_hash);
+        // self.storage.update_canonical(block_number, block_hash);
         self.make_canonical_barrier.notify(block_number, block_hash).await;
     }
 
