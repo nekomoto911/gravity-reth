@@ -21,16 +21,18 @@ use reth_evm::{
     ConfigureEvm,
 };
 use reth_execution_types::{BlockExecutionInput, BlockExecutionOutput, ExecutionOutcome};
-use reth_grevm::new_grevm_scheduler;
+use reth_grevm::{ParallelBundleState, Scheduler, StateAsyncCommit};
 use reth_primitives::{BlockNumber, BlockWithSenders, Header, Receipt};
 use reth_prune_types::PruneModes;
 use reth_revm::{
     batch::BlockBatchRecord,
-    db::{states::bundle_state::BundleRetention, State},
+    db::{states::bundle_state::BundleRetention, BundleState, State},
     state_change::post_block_balance_increments,
+    EvmBuilder, StateBuilder, TransitionState,
 };
 use revm_primitives::{
-    db::WrapDatabaseRef, BlockEnv, CfgEnvWithHandlerCfg, EnvWithHandlerCfg, TxEnv, U256,
+    db::{DatabaseCommit, WrapDatabaseRef},
+    BlockEnv, CfgEnvWithHandlerCfg, Env, EnvWithHandlerCfg, ExecutionResult, SpecId, TxEnv, U256,
 };
 use tracing::*;
 
@@ -86,7 +88,9 @@ where
 {
     chain_spec: Arc<ChainSpec>,
     evm_config: EvmConfig,
-    state: State<WrapDatabaseRef<DB>>,
+    database: Arc<DB>,
+    state: Option<State<WrapDatabaseRef<Arc<DB>>>>,
+    state_clear_flag: bool,
 }
 
 impl<EvmConfig, DB> GrevmBlockExecutor<EvmConfig, DB>
@@ -98,11 +102,9 @@ where
         Self {
             chain_spec,
             evm_config,
-            state: State::builder()
-                .with_database(database.into())
-                .with_bundle_update()
-                .without_state_clear()
-                .build(),
+            database: Arc::new(database),
+            state: None,
+            state_clear_flag: true,
         }
     }
 }
@@ -122,8 +124,15 @@ where
             self.execute_without_verification(block, total_difficulty)?;
 
         // NOTE: we need to merge keep the reverts for the bundle retention
-        self.state.merge_transitions(BundleRetention::Reverts);
-        Ok(BlockExecutionOutput { state: self.state.take_bundle(), receipts, requests, gas_used })
+        let state = self.state.as_mut().unwrap();
+
+        if let Some(transition_state) = state.transition_state.as_mut().map(TransitionState::take) {
+            state.bundle_state.parallel_apply_transitions_and_create_reverts(
+                transition_state,
+                BundleRetention::Reverts,
+            );
+        }
+        Ok(BlockExecutionOutput { state: state.take_bundle(), receipts, requests, gas_used })
     }
 }
 
@@ -132,6 +141,34 @@ where
     EvmConfig: ConfigureEvm<Header = Header>,
     DB: ParallelDatabase,
 {
+    fn sequential_execute(
+        &mut self,
+        spec_id: SpecId,
+        env: Env,
+        txs: Arc<Vec<TxEnv>>,
+    ) -> Result<(Vec<ExecutionResult>, State<WrapDatabaseRef<Arc<DB>>>), BlockExecutionError> {
+        let mut state = StateBuilder::new()
+            .with_bundle_update()
+            .with_database_ref(self.database.clone())
+            .build();
+        state.set_state_clear_flag(self.state_clear_flag);
+        let mut results = Vec::with_capacity(txs.len());
+        {
+            let mut evm = EvmBuilder::default()
+                .with_db(&mut state)
+                .with_spec_id(spec_id)
+                .with_env(Box::new(env))
+                .build();
+            for tx in txs.iter() {
+                *evm.tx_mut() = tx.clone();
+                let result_and_state = evm.transact().map_err(|e| BlockExecutionError::msg(e))?;
+                results.push(result_and_state.result);
+                evm.db_mut().commit(result_and_state.state);
+            }
+        }
+        Ok((results, state))
+    }
+
     /// Execute a single block and apply the state changes to the internal state.
     ///
     /// Returns the receipts of the transactions in the block, the total gas used and the list of
@@ -144,17 +181,15 @@ where
         total_difficulty: U256,
     ) -> Result<EthExecuteOutput, BlockExecutionError> {
         debug!(target: "GrevmBlockExecutor", "Executing block {}", block.number);
+        // Prepare state on new block
+        self.on_new_block(&block.header);
 
         let revm_transition_state = if DEBUG_EXT.compare_with_revm_executor {
             let mut state = State::builder()
-                .with_database(self.state.database.clone())
+                .with_database_ref(self.database.clone())
                 .with_bundle_update()
-                .without_state_clear()
                 .build();
-            state.cache = self.state.cache.clone();
-            state.transition_state = self.state.transition_state.clone();
-            state.bundle_state = self.state.bundle_state.clone();
-            state.block_hashes = self.state.block_hashes.clone();
+            state.set_state_clear_flag(self.state_clear_flag);
             let mut executor = super::execute::EthBlockExecutor::new(
                 self.chain_spec.clone(),
                 self.evm_config.clone(),
@@ -166,51 +201,40 @@ where
             None
         };
 
-        // Prepare state on new block
-        self.on_new_block(&block.header);
-
         // Configure the evm and execute
         let env = self.evm_env_for_block(&block.header, total_difficulty);
-        self.pre_execution(block, &env)?;
-
         // Fill TxEnv from transaction
         let mut txs = vec![TxEnv::default(); block.body.len()];
         for (tx_env, (sender, tx)) in txs.iter_mut().zip(block.transactions_with_sender()) {
             self.evm_config.fill_tx_env(tx_env, tx, *sender);
         }
-
         let txs = Arc::new(txs);
-        // TODO(gravity): pipeline hints generation
-        let mut executor = new_grevm_scheduler(
+        let mut executor = Scheduler::new(
             env.spec_id(),
             env.env.as_ref().clone(),
-            self.state.database.0.clone(),
             txs.clone(),
-            Some(Box::new(reth_grevm::storage::State {
-                cache: std::mem::take(&mut self.state.cache),
-                transition_state: std::mem::take(&mut self.state.transition_state),
-                bundle_state: std::mem::take(&mut self.state.bundle_state),
-                block_hashes: std::mem::take(&mut self.state.block_hashes),
-            })),
+            self.database.clone(),
+            DEBUG_EXT.with_hints,
         );
-        let output = if DEBUG_EXT.force_seq_exec {
-            executor.force_sequential_execute().map_err(|e| BlockExecutionError::msg(e))?
+        executor.with_commiter(|commiter| self.pre_execution(block, &env, &mut commiter.state))?;
+
+        // TODO(gravity): pipeline hints generation
+        let (results, mut state) = if DEBUG_EXT.force_seq_exec {
+            self.sequential_execute(env.spec_id(), env.env.as_ref().clone(), txs.clone())?
         } else {
+            executor.with_commiter(|commiter| {
+                commiter.state.set_state_clear_flag(self.state_clear_flag)
+            });
             if DEBUG_EXT.compare_with_seq_exec {
-                let mut seq_executor = new_grevm_scheduler(
-                    env.spec_id(),
-                    env.env.as_ref().clone(),
-                    self.state.database.0.clone(),
-                    txs.clone(),
-                    Some(executor.database.state.clone()),
-                );
-                seq_executor.force_sequential_execute().map_err(|e| BlockExecutionError::msg(e))?;
-                let output =
-                    executor.parallel_execute().map_err(|e| BlockExecutionError::msg(e))?;
-                let seq_state = seq_executor.take_state();
+                let seq_output =
+                    self.sequential_execute(env.spec_id(), env.env.as_ref().clone(), txs.clone())?;
+                executor.parallel_execute(None).map_err(|e| BlockExecutionError::msg(e))?;
+                let output = executor.take_commiter();
+
+                let seq_state = seq_output.1;
                 if !crate::debug_ext::compare_transition_state(
                     seq_state.transition_state.as_ref().unwrap(),
-                    executor.database.state.transition_state.as_ref().unwrap(),
+                    output.state.transition_state.as_ref().unwrap(),
                 ) {
                     crate::debug_ext::dump_transitions(
                         block.number,
@@ -220,7 +244,7 @@ where
                     .unwrap();
                     crate::debug_ext::dump_transitions(
                         block.number,
-                        executor.database.state.transition_state.as_ref().unwrap(),
+                        output.state.transition_state.as_ref().unwrap(),
                         "parallel_transitions.json",
                     )
                     .unwrap();
@@ -234,26 +258,21 @@ where
                     .unwrap();
                     panic!("Transition state mismatch, block number: {}", block.number);
                 }
-                output
+                (output.results, output.state)
             } else {
-                executor.parallel_execute().map_err(|e| BlockExecutionError::msg(e))?
+                executor.parallel_execute(None).map_err(|e| BlockExecutionError::msg(e))?;
+                let output = executor.take_commiter();
+                (output.results, output.state)
             }
         };
-
-        // Take state from grevm scheduler after execution
-        let state = executor.take_state();
-        self.state.cache = state.cache;
-        self.state.transition_state = state.transition_state;
-        self.state.bundle_state = state.bundle_state;
-        self.state.block_hashes = state.block_hashes;
 
         if DEBUG_EXT.dump_block_env {
             if let Err(err) = crate::debug_ext::dump_block_env(
                 &env,
                 &txs.as_ref(),
-                &self.state.cache,
-                self.state.transition_state.as_ref().unwrap(),
-                &self.state.block_hashes,
+                &state.cache,
+                state.transition_state.as_ref().unwrap(),
+                &state.block_hashes,
             ) {
                 eprintln!("Failed to dump block env: {err}");
             }
@@ -262,17 +281,17 @@ where
         if DEBUG_EXT.dump_transitions {
             if let Err(err) = crate::debug_ext::dump_transitions(
                 block.number,
-                self.state.transition_state.as_ref().unwrap(),
+                state.transition_state.as_ref().unwrap(),
                 "transitions.json",
             ) {
                 eprintln!("Failed to dump transitions: {err}");
             }
         }
 
-        let mut receipts = Vec::with_capacity(output.results.len());
+        let mut receipts = Vec::with_capacity(results.len());
         let mut cumulative_gas_used = 0;
         for (result, tx_type) in
-            output.results.into_iter().zip(block.transactions().map(|tx| tx.tx_type()))
+            results.into_iter().zip(block.transactions().map(|tx| tx.tx_type()))
         {
             cumulative_gas_used += result.gas_used();
             receipts.push(Receipt {
@@ -290,12 +309,31 @@ where
             }
         }
 
+        if let Some(revm_transition_state) = revm_transition_state.as_ref() {
+            // Debug compare transition state between grevm executor and revm executor
+            if revm_transition_state != state.transition_state.as_ref().unwrap() {
+                crate::debug_ext::dump_transitions(
+                    block.number,
+                    revm_transition_state,
+                    "revm_transitions.json",
+                )
+                .unwrap();
+                crate::debug_ext::dump_transitions(
+                    block.number,
+                    state.transition_state.as_ref().unwrap(),
+                    "grevm_transitions.json",
+                )
+                .unwrap();
+                panic!("Transition state mismatch, block number: {}", block.number);
+            }
+        }
+
         let requests = if self.chain_spec.is_prague_active_at_timestamp(block.timestamp) {
             // Collect all EIP-6110 deposits
             let deposit_requests =
                 crate::eip6110::parse_deposits_from_receipts(&self.chain_spec, &receipts)?;
 
-            let mut evm = self.evm_config.evm_with_env(&mut self.state, env);
+            let mut evm = self.evm_config.evm_with_env(&mut state, env);
 
             // Collect all EIP-7685 requests
             let withdrawal_requests =
@@ -309,28 +347,10 @@ where
         } else {
             vec![]
         };
+        self.state = Some(state);
 
         // Apply post execution changes
         self.post_execution(block, total_difficulty)?;
-
-        if let Some(revm_transition_state) = revm_transition_state.as_ref() {
-            // Debug compare transition state between grevm executor and revm executor
-            if revm_transition_state != self.state.transition_state.as_ref().unwrap() {
-                crate::debug_ext::dump_transitions(
-                    block.number,
-                    revm_transition_state,
-                    "revm_transitions.json",
-                )
-                .unwrap();
-                crate::debug_ext::dump_transitions(
-                    block.number,
-                    self.state.transition_state.as_ref().unwrap(),
-                    "grevm_transitions.json",
-                )
-                .unwrap();
-                panic!("Transition state mismatch, block number: {}", block.number);
-            }
-        }
 
         Ok(EthExecuteOutput { receipts, requests, gas_used: cumulative_gas_used })
     }
@@ -338,8 +358,7 @@ where
     /// Apply settings before a new block is executed.
     fn on_new_block(&mut self, header: &Header) {
         // Set state clear flag if the block is after the Spurious Dragon hardfork.
-        let state_clear_flag = self.chain_spec.is_spurious_dragon_active_at_block(header.number);
-        self.state.set_state_clear_flag(state_clear_flag);
+        self.state_clear_flag = self.chain_spec.is_spurious_dragon_active_at_block(header.number);
     }
 
     fn evm_env_for_block(&self, header: &Header, total_difficulty: U256) -> EnvWithHandlerCfg {
@@ -354,12 +373,13 @@ where
         &mut self,
         block: &BlockWithSenders,
         env: &EnvWithHandlerCfg,
+        state: &mut State<WrapDatabaseRef<Arc<DB>>>,
     ) -> Result<(), BlockExecutionError> {
         if !self.chain_spec.is_cancun_active_at_timestamp(block.timestamp) {
             return Ok(())
         }
 
-        let mut evm = self.evm_config.evm_with_env(&mut self.state, env.clone());
+        let mut evm = self.evm_config.evm_with_env(state, env.clone());
         apply_beacon_root_contract_call(
             &self.evm_config,
             &self.chain_spec,
@@ -393,6 +413,8 @@ where
             // drain balances from hardcoded addresses.
             let drained_balance: u128 = self
                 .state
+                .as_mut()
+                .unwrap()
                 .drain_balances(DAO_HARDKFORK_ACCOUNTS)
                 .map_err(|_| BlockValidationError::IncrementBalanceFailed)?
                 .into_iter()
@@ -403,6 +425,8 @@ where
         }
         // increment balances
         self.state
+            .as_mut()
+            .unwrap()
             .increment_balances(balance_increments)
             .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
         Ok(())
@@ -453,7 +477,7 @@ where
 
         // prepare the state according to the prune mode
         let retention = self.batch_record.bundle_retention(block.number);
-        self.executor.state.merge_transitions(retention);
+        self.executor.state.as_mut().unwrap().merge_transitions(retention);
 
         // store receipts in the set
         self.batch_record.save_receipts(receipts)?;
@@ -466,7 +490,10 @@ where
 
     fn finalize(mut self) -> Self::Output {
         ExecutionOutcome::new(
-            self.executor.state.take_bundle(),
+            self.executor
+                .state
+                .as_mut()
+                .map_or(BundleState::default(), |state| state.take_bundle()),
             self.batch_record.take_receipts(),
             self.batch_record.first_block().unwrap_or_default(),
             self.batch_record.take_requests(),
@@ -482,6 +509,6 @@ where
     }
 
     fn size_hint(&self) -> Option<usize> {
-        Some(self.executor.state.bundle_state.size_hint())
+        self.executor.state.as_ref().map(|state| state.bundle_state.size_hint())
     }
 }
