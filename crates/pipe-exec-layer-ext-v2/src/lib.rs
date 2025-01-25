@@ -4,7 +4,10 @@ use alloy_primitives::B256;
 use reth_chain_state::ExecutedBlock;
 use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_evm::{
-    execute::{BlockExecutionInput, BlockExecutorProvider, Executor},
+    execute::{
+        BlockExecutionError, BlockExecutionInput, BlockExecutorProvider, BlockValidationError,
+        Executor,
+    },
     ConfigureEvmEnv, NextBlockEnvAttributes,
 };
 use reth_evm_ethereum::{execute::EthExecutorProvider, EthEvmConfig};
@@ -14,8 +17,8 @@ use reth_primitives::{
     proofs, Address, Block, BlockWithSenders, Header, Receipt, TransactionSigned, Withdrawals,
     EMPTY_OMMER_ROOT_HASH, U256,
 };
-use revm::State;
-use std::sync::Arc;
+use revm::{db::WrapDatabaseRef, DatabaseRef, State};
+use std::{collections::HashMap, error::Error, sync::Arc};
 
 use once_cell::sync::OnceCell;
 
@@ -209,12 +212,12 @@ impl<Storage: GravityStorage> Core<Storage> {
             "new ordered block"
         );
 
-        self.storage.insert_block_id(block_number, block_id);
         // Retrieve the parent block header to generate the necessary configs for
         // executing the current block
         let parent_block_header = self.execute_block_barrier.wait(block_number - 1).await.unwrap();
         let (mut block, outcome) = self.execute_ordered_block(ordered_block, &parent_block_header);
         self.storage.insert_bundle_state(block_number, &outcome.state);
+        self.storage.insert_block_id(block_number, block_id);
         self.execute_block_barrier.notify(block_number, block.header.clone()).await.unwrap();
 
         let execution_outcome = self.calculate_roots(&mut block, outcome);
@@ -254,16 +257,37 @@ impl<Storage: GravityStorage> Core<Storage> {
             "block verified"
         );
 
+        let senders = Arc::new(block.senders);
+        let block = Arc::new(block.block);
+
         // Make the block canonical
         self.make_canonical(ExecutedBlock {
-            block: Arc::new(block.block),
-            senders: Arc::new(block.senders),
+            block: block.clone(),
+            senders: senders.clone(),
             execution_output: Arc::new(execution_outcome),
             hashed_state,
             trie: trie_output,
         })
         .await;
         self.storage.update_canonical(block_number, block_hash);
+
+        {
+            //let (block_id_, state) = self.storage.get_state_view(block_number).unwrap();
+            //assert_eq!(block_id_, block_id);
+            //let sender_with_nonce: HashMap<_, _> =
+            //    senders.iter().zip(block.body.iter().map(|tx| tx.nonce())).collect();
+            //for (sender, nonce) in sender_with_nonce.into_iter() {
+            //    let info = state.basic_ref(*sender).unwrap().unwrap();
+            //    assert_eq!(
+            //        info.nonce,
+            //        nonce + 1,
+            //        "nonce mismatch sender={:?}\n{:?}",
+            //        sender,
+            //        state
+            //    );
+            //}
+        }
+
         self.make_canonical_barrier.notify(block_number, block_hash).await;
     }
 
@@ -348,8 +372,9 @@ impl<Storage: GravityStorage> Core<Storage> {
         }
 
         let (parent_id, state) = self.storage.get_state_view(block.number - 1).unwrap();
+        let state = Arc::new(state);
         assert_eq!(parent_id, ordered_block.parent_id);
-        let db = State::builder().with_database_ref(state).with_bundle_update().build();
+        let db = State::builder().with_database_ref(state.clone()).with_bundle_update().build();
 
         let executor_provider =
             EthExecutorProvider::new(self.chain_spec.clone(), self.evm_config.clone());
@@ -357,13 +382,15 @@ impl<Storage: GravityStorage> Core<Storage> {
             .executor(db)
             .execute(BlockExecutionInput { block: &block, total_difficulty: block_env.difficulty })
             .unwrap_or_else(|err| {
-                panic!("failed to execute block {:?}: {:?}", ordered_block.id, err)
+                debug!(target: "execute_ordered_block", ?state, "block execution failed");
+                panic!("failed to execute block {:?}: {:?}", ordered_block.id, err);
             });
 
         debug!(target: "execute_ordered_block",
             id=?ordered_block.id,
             parent_id=?ordered_block.parent_id,
             number=?ordered_block.number,
+            state=?outcome.state.state(),
             "block executed"
         );
 

@@ -34,7 +34,7 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-use tracing::trace;
+use tracing::{debug, trace};
 
 use super::ProviderNodeTypes;
 
@@ -1111,11 +1111,13 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider2<N> {
     ) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", ?block_hash, "Getting history by block hash");
         if let Ok(state) = self.database.history_by_block_hash(block_hash, opts.clone()) {
+            debug!(target: "history_by_block_hash", ?block_hash, "Using database state for history");
             // This could be tracked by a block in the database block
             Ok(state)
         } else if let Some(state) = self.canonical_in_memory_state.state_by_hash(block_hash) {
             // ... or this could be tracked by the in memory state
             let state_provider = self.block_state_provider(state, opts)?;
+            debug!(target: "history_by_block_hash", ?block_hash, ?state_provider, "Using in-memory state for history thread={:?}", std::thread::current().id());
             Ok(Box::new(state_provider))
         } else {
             // if we couldn't find it anywhere, then we should return an error

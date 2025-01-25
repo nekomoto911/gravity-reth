@@ -22,6 +22,7 @@ use std::{
     time::Instant,
 };
 use tokio::sync::{broadcast, watch};
+use tracing::debug;
 
 /// Size of the broadcast channel used to notify canonical state events.
 const CANON_STATE_NOTIFICATION_CHANNEL_SIZE: usize = 256;
@@ -604,7 +605,9 @@ impl BlockState {
 
     /// Returns the hash and block of the on disk block this state can be traced back to.
     pub fn anchor(&self) -> BlockNumHash {
+        debug!(target: "anchor", "thread={:?} hash={:?} number={} parent_num_hash={:?}", std::thread::current().id(), self.block.block.hash(), self.block.block.number, self.block.block().parent_num_hash());
         if let Some(parent) = &self.parent {
+            debug!(target: "anchor", "thread={:?} hash={:?} number={} parent_hash={:?} parent_num={:?}", std::thread::current().id(), self.block.block.hash(), self.block.block.number, parent.block.block.hash(), parent.block.block.number);
             parent.anchor()
         } else {
             self.block.block().parent_num_hash()
@@ -932,12 +935,13 @@ mod tests {
         ) -> ProviderResult<(B256, TrieUpdates)> {
             Ok((B256::random(), TrieUpdates::default()))
         }
-        
-        fn state_root_with_updates_v2(&self,
-            state:HashedPostState,
+
+        fn state_root_with_updates_v2(
+            &self,
+            state: HashedPostState,
             hashed_state_vec: Vec<Arc<HashedPostState>>,
             trie_updates_vec: Vec<Arc<TrieUpdates>>,
-        ) -> ProviderResult<(B256,TrieUpdates)>  {
+        ) -> ProviderResult<(B256, TrieUpdates)> {
             Ok((B256::random(), TrieUpdates::default()))
         }
     }

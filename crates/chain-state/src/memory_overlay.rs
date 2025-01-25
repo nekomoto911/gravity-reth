@@ -11,6 +11,7 @@ use reth_trie::{
 };
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Debug,
     sync::{Arc, OnceLock},
 };
 
@@ -24,6 +25,14 @@ pub struct MemoryOverlayStateProvider {
     pub(crate) in_memory: Vec<ExecutedBlock>,
     /// Lazy-loaded in-memory trie data.
     pub(crate) trie_state: OnceLock<MemoryOverlayTrieState>,
+}
+
+impl Debug for MemoryOverlayStateProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryOverlayStateProvider")
+            .field("in_memory", &self.in_memory.iter().map(|b| b.block.number).collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl MemoryOverlayStateProvider {

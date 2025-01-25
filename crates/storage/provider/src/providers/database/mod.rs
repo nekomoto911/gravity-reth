@@ -32,7 +32,7 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::watch;
-use tracing::trace;
+use tracing::{debug, trace};
 
 mod provider;
 pub use provider::{DatabaseProvider, DatabaseProviderRO, DatabaseProviderRW};
@@ -203,7 +203,7 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
             .ok_or(ProviderError::BlockHashNotFound(block_hash))?;
 
         let state_provider = self.history_by_block_number(block_number, opts)?;
-        trace!(target: "providers::db", ?block_number, %block_hash, "Returning historical state provider for block hash");
+        debug!(target: "providers::db", ?block_number, %block_hash, "Returning historical state provider for block hash");
         Ok(state_provider)
     }
 }

@@ -34,6 +34,7 @@ use reth_provider::{
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_rpc_types::{
+    debug,
     engine::{
         CancunPayloadFields, ForkchoiceState, PayloadStatus, PayloadStatusEnum,
         PayloadValidationError,
@@ -1440,6 +1441,12 @@ where
     /// This will update the tracked canonical in memory state and do the necessary housekeeping.
     fn make_canonical(&mut self, target: B256, finalized: Option<B256>) -> ProviderResult<()> {
         if let Some(chain_update) = self.on_new_head(target, finalized)? {
+            debug!(target: "make_canonical", "chain_update={:?}", match &chain_update {
+                NewCanonicalChain::Commit { new } => new.iter().map(|b| (b.block.number, b.block.hash())).collect::<Vec<_>>(),
+                _ => {
+                    panic!("Reorgs should not be triggered by make_canonical")
+                }
+            });
             self.on_canonical_chain_update(chain_update);
         }
 
