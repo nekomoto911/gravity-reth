@@ -1,25 +1,27 @@
 //! Dummy blocks and data for tests
-use crate::{DatabaseProviderRW, ExecutionOutcome};
+use crate::{DBProvider, DatabaseProviderRW, ExecutionOutcome};
+use alloy_consensus::{TxLegacy, EMPTY_OMMER_ROOT_HASH};
 use alloy_primitives::{
-    b256, hex_literal::hex, Address, BlockNumber, Bytes, Log, TxKind, B256, U256,
+    b256, hex_literal::hex, map::HashMap, Address, BlockNumber, Bytes, Log, TxKind, B256, U256,
 };
-use once_cell::sync::Lazy;
+
+use alloy_consensus::Header;
+use alloy_eips::eip4895::{Withdrawal, Withdrawals};
+use alloy_primitives::PrimitiveSignature as Signature;
 use reth_db::tables;
 use reth_db_api::{database::Database, models::StoredBlockBodyIndices};
+use reth_node_types::NodeTypes;
 use reth_primitives::{
-    Account, Header, Receipt, Requests, SealedBlock, SealedBlockWithSenders, SealedHeader,
-    Signature, Transaction, TransactionSigned, TxLegacy, TxType, Withdrawal, Withdrawals,
+    Account, BlockBody, Receipt, SealedBlock, SealedBlockWithSenders, SealedHeader, Transaction,
+    TransactionSigned, TxType,
 };
 use reth_trie::root::{state_root_unhashed, storage_root_unhashed};
-use revm::{
-    db::BundleState,
-    primitives::{AccountInfo, HashMap},
-};
-use std::str::FromStr;
+use revm::{db::BundleState, primitives::AccountInfo};
+use std::{str::FromStr, sync::LazyLock};
 
 /// Assert genesis block
-pub fn assert_genesis_block<DB: Database, Spec: Send + Sync>(
-    provider: &DatabaseProviderRW<DB, Spec>,
+pub fn assert_genesis_block<DB: Database, N: NodeTypes>(
+    provider: &DatabaseProviderRW<DB, N>,
     g: SealedBlock,
 ) {
     let n = g.number;
@@ -41,7 +43,6 @@ pub fn assert_genesis_block<DB: Database, Spec: Send + Sync>(
     );
     assert_eq!(tx.table::<tables::BlockOmmers>().unwrap(), vec![]);
     assert_eq!(tx.table::<tables::BlockWithdrawals>().unwrap(), vec![]);
-    assert_eq!(tx.table::<tables::BlockRequests>().unwrap(), vec![]);
     assert_eq!(tx.table::<tables::Transactions>().unwrap(), vec![]);
     assert_eq!(tx.table::<tables::TransactionBlocks>().unwrap(), vec![]);
     assert_eq!(tx.table::<tables::TransactionHashNumbers>().unwrap(), vec![]);
@@ -62,52 +63,61 @@ pub fn assert_genesis_block<DB: Database, Spec: Send + Sync>(
     // StageCheckpoints is not updated in tests
 }
 
-pub(crate) static TEST_BLOCK: Lazy<SealedBlock> = Lazy::new(|| SealedBlock {
-    header: SealedHeader::new(
-        Header {
-            parent_hash: hex!("c86e8cc0310ae7c531c758678ddbfd16fc51c8cef8cec650b032de9869e8b94f")
+pub(crate) static TEST_BLOCK: LazyLock<SealedBlock> = LazyLock::new(|| {
+    SealedBlock::new(
+        SealedHeader::new(
+            Header {
+                parent_hash: hex!(
+                    "c86e8cc0310ae7c531c758678ddbfd16fc51c8cef8cec650b032de9869e8b94f"
+                )
                 .into(),
-            ommers_hash: hex!("1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347")
+                ommers_hash: EMPTY_OMMER_ROOT_HASH,
+                beneficiary: hex!("2adc25665018aa1fe0e6bc666dac8fc2697ff9ba").into(),
+                state_root: hex!(
+                    "50554882fbbda2c2fd93fdc466db9946ea262a67f7a76cc169e714f105ab583d"
+                )
                 .into(),
-            beneficiary: hex!("2adc25665018aa1fe0e6bc666dac8fc2697ff9ba").into(),
-            state_root: hex!("50554882fbbda2c2fd93fdc466db9946ea262a67f7a76cc169e714f105ab583d")
+                transactions_root: hex!(
+                    "0967f09ef1dfed20c0eacfaa94d5cd4002eda3242ac47eae68972d07b106d192"
+                )
                 .into(),
-            transactions_root: hex!(
-                "0967f09ef1dfed20c0eacfaa94d5cd4002eda3242ac47eae68972d07b106d192"
-            )
-            .into(),
-            receipts_root: hex!("e3c8b47fbfc94667ef4cceb17e5cc21e3b1eebd442cebb27f07562b33836290d")
+                receipts_root: hex!(
+                    "e3c8b47fbfc94667ef4cceb17e5cc21e3b1eebd442cebb27f07562b33836290d"
+                )
                 .into(),
-            difficulty: U256::from(131_072),
-            number: 1,
-            gas_limit: 1_000_000,
-            gas_used: 14_352,
-            timestamp: 1_000,
+                difficulty: U256::from(131_072),
+                number: 1,
+                gas_limit: 1_000_000,
+                gas_used: 14_352,
+                timestamp: 1_000,
+                ..Default::default()
+            },
+            hex!("cf7b274520720b50e6a4c3e5c4d553101f44945396827705518ce17cb7219a42").into(),
+        ),
+        BlockBody {
+            transactions: vec![TransactionSigned::new(
+            Transaction::Legacy(TxLegacy {
+                gas_price: 10,
+                gas_limit: 400_000,
+                to: TxKind::Call(hex!("095e7baea6a6c7c4c2dfeb977efac326af552d87").into()),
+                ..Default::default()
+            }),
+            Signature::new(
+                U256::from_str(
+                    "51983300959770368863831494747186777928121405155922056726144551509338672451120",
+                )
+                .unwrap(),
+                U256::from_str(
+                    "29056683545955299640297374067888344259176096769870751649153779895496107008675",
+                )
+                .unwrap(),
+                false,
+            ),
+            b256!("3541dd1d17e76adeb25dcf2b0a9b60a1669219502e58dcf26a2beafbfb550397"),
+        )],
             ..Default::default()
         },
-        hex!("cf7b274520720b50e6a4c3e5c4d553101f44945396827705518ce17cb7219a42").into(),
-    ),
-    body: vec![TransactionSigned {
-        hash: hex!("3541dd1d17e76adeb25dcf2b0a9b60a1669219502e58dcf26a2beafbfb550397").into(),
-        signature: Signature {
-            r: U256::from_str(
-                "51983300959770368863831494747186777928121405155922056726144551509338672451120",
-            )
-            .unwrap(),
-            s: U256::from_str(
-                "29056683545955299640297374067888344259176096769870751649153779895496107008675",
-            )
-            .unwrap(),
-            odd_y_parity: false,
-        },
-        transaction: Transaction::Legacy(TxLegacy {
-            gas_price: 10,
-            gas_limit: 400_000,
-            to: TxKind::Call(hex!("095e7baea6a6c7c4c2dfeb977efac326af552d87").into()),
-            ..Default::default()
-        }),
-    }],
-    ..Default::default()
+    )
 });
 
 /// Test chain with genesis, blocks, execution results
@@ -153,14 +163,13 @@ impl Default for BlockchainTestData {
 
 /// Genesis block
 pub fn genesis() -> SealedBlock {
-    SealedBlock {
-        header: Header { number: 0, difficulty: U256::from(1), ..Default::default() }
-            .seal(B256::ZERO),
-        body: vec![],
-        ommers: vec![],
-        withdrawals: Some(Withdrawals::default()),
-        requests: Some(Requests::default()),
-    }
+    SealedBlock::new(
+        SealedHeader::new(
+            Header { number: 0, difficulty: U256::from(1), ..Default::default() },
+            B256::ZERO,
+        ),
+        Default::default(),
+    )
 }
 
 fn bundle_state_root(execution_outcome: &ExecutionOutcome) -> B256 {
@@ -169,16 +178,13 @@ fn bundle_state_root(execution_outcome: &ExecutionOutcome) -> B256 {
             account.info.as_ref().map(|info| {
                 (
                     address,
-                    (
-                        Into::<Account>::into(info.clone()),
-                        storage_root_unhashed(
-                            account
-                                .storage
-                                .iter()
-                                .filter(|(_, value)| !value.present_value.is_zero())
-                                .map(|(slot, value)| ((*slot).into(), value.present_value)),
-                        ),
-                    ),
+                    Account::from(info).into_trie_account(storage_root_unhashed(
+                        account
+                            .storage
+                            .iter()
+                            .filter(|(_, value)| !value.present_value.is_zero())
+                            .map(|(slot, value)| ((*slot).into(), value.present_value)),
+                    )),
                 )
             })
         },
@@ -199,22 +205,22 @@ fn block1(number: BlockNumber) -> (SealedBlockWithSenders, ExecutionOutcome) {
             .revert_account_info(number, account1, Some(None))
             .state_present_account_info(account2, info)
             .revert_account_info(number, account2, Some(None))
-            .state_storage(account1, HashMap::from([(slot, (U256::ZERO, U256::from(10)))]))
+            .state_storage(account1, HashMap::from_iter([(slot, (U256::ZERO, U256::from(10)))]))
             .build(),
-        vec![vec![Some(Receipt {
-            tx_type: TxType::Eip2930,
-            success: true,
-            cumulative_gas_used: 300,
-            logs: vec![Log::new_unchecked(
-                Address::new([0x60; 20]),
-                vec![B256::with_last_byte(1), B256::with_last_byte(2)],
-                Bytes::default(),
-            )],
-            #[cfg(feature = "optimism")]
-            deposit_nonce: None,
-            #[cfg(feature = "optimism")]
-            deposit_receipt_version: None,
-        })]]
+        vec![vec![Some(
+            #[allow(clippy::needless_update)] // side-effect of optimism fields
+            Receipt {
+                tx_type: TxType::Eip2930,
+                success: true,
+                cumulative_gas_used: 300,
+                logs: vec![Log::new_unchecked(
+                    Address::new([0x60; 20]),
+                    vec![B256::with_last_byte(1), B256::with_last_byte(2)],
+                    Bytes::default(),
+                )],
+                ..Default::default()
+            },
+        )]]
         .into(),
         number,
         Vec::new(),
@@ -226,13 +232,13 @@ fn block1(number: BlockNumber) -> (SealedBlockWithSenders, ExecutionOutcome) {
         b256!("5d035ccb3e75a9057452ff060b773b213ec1fc353426174068edfc3971a0b6bd")
     );
 
-    let mut block = TEST_BLOCK.clone();
-    block.withdrawals = Some(Withdrawals::new(vec![Withdrawal::default()]));
-    let mut header = block.header.clone().unseal();
+    let (header, mut body) = TEST_BLOCK.clone().split_header_body();
+    body.withdrawals = Some(Withdrawals::new(vec![Withdrawal::default()]));
+    let mut header = header.unseal();
     header.number = number;
     header.state_root = state_root;
     header.parent_hash = B256::ZERO;
-    block.header = header.seal_slow();
+    let block = SealedBlock::new(SealedHeader::seal(header), body);
 
     (SealedBlockWithSenders { block, senders: vec![Address::new([0x30; 20])] }, execution_outcome)
 }
@@ -253,7 +259,7 @@ fn block2(
                 account,
                 AccountInfo { nonce: 3, balance: U256::from(20), ..Default::default() },
             )
-            .state_storage(account, HashMap::from([(slot, (U256::ZERO, U256::from(15)))]))
+            .state_storage(account, HashMap::from_iter([(slot, (U256::ZERO, U256::from(15)))]))
             .revert_account_info(
                 number,
                 account,
@@ -261,20 +267,20 @@ fn block2(
             )
             .revert_storage(number, account, Vec::from([(slot, U256::from(10))]))
             .build(),
-        vec![vec![Some(Receipt {
-            tx_type: TxType::Eip1559,
-            success: false,
-            cumulative_gas_used: 400,
-            logs: vec![Log::new_unchecked(
-                Address::new([0x61; 20]),
-                vec![B256::with_last_byte(3), B256::with_last_byte(4)],
-                Bytes::default(),
-            )],
-            #[cfg(feature = "optimism")]
-            deposit_nonce: None,
-            #[cfg(feature = "optimism")]
-            deposit_receipt_version: None,
-        })]]
+        vec![vec![Some(
+            #[allow(clippy::needless_update)] // side-effect of optimism fields
+            Receipt {
+                tx_type: TxType::Eip1559,
+                success: false,
+                cumulative_gas_used: 400,
+                logs: vec![Log::new_unchecked(
+                    Address::new([0x61; 20]),
+                    vec![B256::with_last_byte(3), B256::with_last_byte(4)],
+                    Bytes::default(),
+                )],
+                ..Default::default()
+            },
+        )]]
         .into(),
         number,
         Vec::new(),
@@ -288,15 +294,15 @@ fn block2(
         b256!("90101a13dd059fa5cca99ed93d1dc23657f63626c5b8f993a2ccbdf7446b64f8")
     );
 
-    let mut block = TEST_BLOCK.clone();
+    let (header, mut body) = TEST_BLOCK.clone().split_header_body();
 
-    block.withdrawals = Some(Withdrawals::new(vec![Withdrawal::default()]));
-    let mut header = block.header.clone().unseal();
+    body.withdrawals = Some(Withdrawals::new(vec![Withdrawal::default()]));
+    let mut header = header.unseal();
     header.number = number;
     header.state_root = state_root;
     // parent_hash points to block1 hash
     header.parent_hash = parent_hash;
-    block.header = header.seal_slow();
+    let block = SealedBlock::new(SealedHeader::seal(header), body);
 
     (SealedBlockWithSenders { block, senders: vec![Address::new([0x31; 20])] }, execution_outcome)
 }
@@ -320,31 +326,30 @@ fn block3(
             )
             .state_storage(
                 address,
-                HashMap::from_iter(
-                    slot_range
-                        .clone()
-                        .map(|slot| (U256::from(slot), (U256::ZERO, U256::from(slot)))),
-                ),
+                slot_range
+                    .clone()
+                    .map(|slot| (U256::from(slot), (U256::ZERO, U256::from(slot))))
+                    .collect(),
             )
             .revert_account_info(number, address, Some(None))
             .revert_storage(number, address, Vec::new());
     }
     let execution_outcome = ExecutionOutcome::new(
         bundle_state_builder.build(),
-        vec![vec![Some(Receipt {
-            tx_type: TxType::Eip1559,
-            success: true,
-            cumulative_gas_used: 400,
-            logs: vec![Log::new_unchecked(
-                Address::new([0x61; 20]),
-                vec![B256::with_last_byte(3), B256::with_last_byte(4)],
-                Bytes::default(),
-            )],
-            #[cfg(feature = "optimism")]
-            deposit_nonce: None,
-            #[cfg(feature = "optimism")]
-            deposit_receipt_version: None,
-        })]]
+        vec![vec![Some(
+            #[allow(clippy::needless_update)] // side-effect of optimism fields
+            Receipt {
+                tx_type: TxType::Eip1559,
+                success: true,
+                cumulative_gas_used: 400,
+                logs: vec![Log::new_unchecked(
+                    Address::new([0x61; 20]),
+                    vec![B256::with_last_byte(3), B256::with_last_byte(4)],
+                    Bytes::default(),
+                )],
+                ..Default::default()
+            },
+        )]]
         .into(),
         number,
         Vec::new(),
@@ -354,14 +359,14 @@ fn block3(
     extended.extend(execution_outcome.clone());
     let state_root = bundle_state_root(&extended);
 
-    let mut block = TEST_BLOCK.clone();
-    block.withdrawals = Some(Withdrawals::new(vec![Withdrawal::default()]));
-    let mut header = block.header.clone().unseal();
+    let (header, mut body) = TEST_BLOCK.clone().split_header_body();
+    body.withdrawals = Some(Withdrawals::new(vec![Withdrawal::default()]));
+    let mut header = header.unseal();
     header.number = number;
     header.state_root = state_root;
     // parent_hash points to block1 hash
     header.parent_hash = parent_hash;
-    block.header = header.seal_slow();
+    let block = SealedBlock::new(SealedHeader::seal(header), body);
 
     (SealedBlockWithSenders { block, senders: vec![Address::new([0x31; 20])] }, execution_outcome)
 }
@@ -387,20 +392,18 @@ fn block4(
                 )
                 .state_storage(
                     address,
-                    HashMap::from_iter(
-                        slot_range.clone().map(|slot| {
-                            (U256::from(slot), (U256::from(slot), U256::from(slot * 2)))
-                        }),
-                    ),
+                    slot_range
+                        .clone()
+                        .map(|slot| (U256::from(slot), (U256::from(slot), U256::from(slot * 2))))
+                        .collect(),
                 )
         } else {
             bundle_state_builder.state_address(address).state_storage(
                 address,
-                HashMap::from_iter(
-                    slot_range
-                        .clone()
-                        .map(|slot| (U256::from(slot), (U256::from(slot), U256::ZERO))),
-                ),
+                slot_range
+                    .clone()
+                    .map(|slot| (U256::from(slot), (U256::from(slot), U256::ZERO)))
+                    .collect(),
             )
         };
         // record previous account info
@@ -417,25 +420,25 @@ fn block4(
             .revert_storage(
                 number,
                 address,
-                Vec::from_iter(slot_range.clone().map(|slot| (U256::from(slot), U256::from(slot)))),
+                slot_range.clone().map(|slot| (U256::from(slot), U256::from(slot))).collect(),
             );
     }
     let execution_outcome = ExecutionOutcome::new(
         bundle_state_builder.build(),
-        vec![vec![Some(Receipt {
-            tx_type: TxType::Eip1559,
-            success: true,
-            cumulative_gas_used: 400,
-            logs: vec![Log::new_unchecked(
-                Address::new([0x61; 20]),
-                vec![B256::with_last_byte(3), B256::with_last_byte(4)],
-                Bytes::default(),
-            )],
-            #[cfg(feature = "optimism")]
-            deposit_nonce: None,
-            #[cfg(feature = "optimism")]
-            deposit_receipt_version: None,
-        })]]
+        vec![vec![Some(
+            #[allow(clippy::needless_update)] // side-effect of optimism fields
+            Receipt {
+                tx_type: TxType::Eip1559,
+                success: true,
+                cumulative_gas_used: 400,
+                logs: vec![Log::new_unchecked(
+                    Address::new([0x61; 20]),
+                    vec![B256::with_last_byte(3), B256::with_last_byte(4)],
+                    Bytes::default(),
+                )],
+                ..Default::default()
+            },
+        )]]
         .into(),
         number,
         Vec::new(),
@@ -445,14 +448,14 @@ fn block4(
     extended.extend(execution_outcome.clone());
     let state_root = bundle_state_root(&extended);
 
-    let mut block = TEST_BLOCK.clone();
-    block.withdrawals = Some(Withdrawals::new(vec![Withdrawal::default()]));
-    let mut header = block.header.clone().unseal();
+    let (header, mut body) = TEST_BLOCK.clone().split_header_body();
+    body.withdrawals = Some(Withdrawals::new(vec![Withdrawal::default()]));
+    let mut header = header.unseal();
     header.number = number;
     header.state_root = state_root;
     // parent_hash points to block1 hash
     header.parent_hash = parent_hash;
-    block.header = header.seal_slow();
+    let block = SealedBlock::new(SealedHeader::seal(header), body);
 
     (SealedBlockWithSenders { block, senders: vec![Address::new([0x31; 20])] }, execution_outcome)
 }
@@ -477,12 +480,11 @@ fn block5(
             )
             .state_storage(
                 address,
-                HashMap::from_iter(
-                    slot_range
-                        .clone()
-                        .take(50)
-                        .map(|slot| (U256::from(slot), (U256::from(slot), U256::from(slot * 4)))),
-                ),
+                slot_range
+                    .clone()
+                    .take(50)
+                    .map(|slot| (U256::from(slot), (U256::from(slot), U256::from(slot * 4))))
+                    .collect(),
             );
         bundle_state_builder = if idx % 2 == 0 {
             bundle_state_builder
@@ -498,9 +500,10 @@ fn block5(
                 .revert_storage(
                     number,
                     address,
-                    Vec::from_iter(
-                        slot_range.clone().map(|slot| (U256::from(slot), U256::from(slot * 2))),
-                    ),
+                    slot_range
+                        .clone()
+                        .map(|slot| (U256::from(slot), U256::from(slot * 2)))
+                        .collect(),
                 )
         } else {
             bundle_state_builder.revert_address(number, address)
@@ -508,20 +511,20 @@ fn block5(
     }
     let execution_outcome = ExecutionOutcome::new(
         bundle_state_builder.build(),
-        vec![vec![Some(Receipt {
-            tx_type: TxType::Eip1559,
-            success: true,
-            cumulative_gas_used: 400,
-            logs: vec![Log::new_unchecked(
-                Address::new([0x61; 20]),
-                vec![B256::with_last_byte(3), B256::with_last_byte(4)],
-                Bytes::default(),
-            )],
-            #[cfg(feature = "optimism")]
-            deposit_nonce: None,
-            #[cfg(feature = "optimism")]
-            deposit_receipt_version: None,
-        })]]
+        vec![vec![Some(
+            #[allow(clippy::needless_update)] // side-effect of optimism fields
+            Receipt {
+                tx_type: TxType::Eip1559,
+                success: true,
+                cumulative_gas_used: 400,
+                logs: vec![Log::new_unchecked(
+                    Address::new([0x61; 20]),
+                    vec![B256::with_last_byte(3), B256::with_last_byte(4)],
+                    Bytes::default(),
+                )],
+                ..Default::default()
+            },
+        )]]
         .into(),
         number,
         Vec::new(),
@@ -531,14 +534,14 @@ fn block5(
     extended.extend(execution_outcome.clone());
     let state_root = bundle_state_root(&extended);
 
-    let mut block = TEST_BLOCK.clone();
-    block.withdrawals = Some(Withdrawals::new(vec![Withdrawal::default()]));
-    let mut header = block.header.clone().unseal();
+    let (header, mut body) = TEST_BLOCK.clone().split_header_body();
+    body.withdrawals = Some(Withdrawals::new(vec![Withdrawal::default()]));
+    let mut header = header.unseal();
     header.number = number;
     header.state_root = state_root;
     // parent_hash points to block1 hash
     header.parent_hash = parent_hash;
-    block.header = header.seal_slow();
+    let block = SealedBlock::new(SealedHeader::seal(header), body);
 
     (SealedBlockWithSenders { block, senders: vec![Address::new([0x31; 20])] }, execution_outcome)
 }

@@ -1,3 +1,4 @@
+use alloy_primitives::{keccak256, B256};
 use itertools::Itertools;
 use reth_config::config::{EtlConfig, HashingConfig};
 use reth_db::{tables, RawKey, RawTable, RawValue};
@@ -6,7 +7,7 @@ use reth_db_api::{
     transaction::{DbTx, DbTxMut},
 };
 use reth_etl::Collector;
-use reth_primitives::{keccak256, Account, B256};
+use reth_primitives::Account;
 use reth_provider::{AccountExtReader, DBProvider, HashingWriter, StatsReader};
 use reth_stages_api::{
     AccountHashingCheckpoint, EntitiesCheckpoint, ExecInput, ExecOutput, Stage, StageCheckpoint,
@@ -57,15 +58,18 @@ impl AccountHashingStage {
     ///
     /// Proceeds to go to the `BlockTransitionIndex` end, go back `transitions` and change the
     /// account state in the `AccountChangeSets` table.
-    pub fn seed<
-        Tx: DbTx + DbTxMut + 'static,
-        Spec: Send + Sync + 'static + reth_chainspec::EthereumHardforks,
-    >(
-        provider: &reth_provider::DatabaseProvider<Tx, Spec>,
+    pub fn seed<Tx: DbTx + DbTxMut + 'static, N: reth_provider::providers::ProviderNodeTypes>(
+        provider: &reth_provider::DatabaseProvider<Tx, N>,
         opts: SeedOpts,
-    ) -> Result<Vec<(reth_primitives::Address, reth_primitives::Account)>, StageError> {
+    ) -> Result<Vec<(alloy_primitives::Address, reth_primitives::Account)>, StageError>
+    where
+        N::Primitives: reth_primitives_traits::FullNodePrimitives<
+            BlockBody = reth_primitives::BlockBody,
+            BlockHeader = reth_primitives::Header,
+        >,
+    {
+        use alloy_primitives::U256;
         use reth_db_api::models::AccountBeforeTx;
-        use reth_primitives::U256;
         use reth_provider::{StaticFileProviderFactory, StaticFileWriter};
         use reth_testing_utils::{
             generators,
@@ -233,7 +237,7 @@ where
             input.unwind_block_range_with_threshold(self.commit_threshold);
 
         // Aggregate all transition changesets and make a list of accounts that have been changed.
-        provider.unwind_account_hashing(range)?;
+        provider.unwind_account_hashing_range(range)?;
 
         let mut stage_checkpoint =
             input.checkpoint.account_hashing_stage_checkpoint().unwrap_or_default();
@@ -297,8 +301,9 @@ mod tests {
         stage_test_suite_ext, ExecuteStageTestRunner, StageTestRunner, TestRunnerError,
         UnwindStageTestRunner,
     };
+    use alloy_primitives::U256;
     use assert_matches::assert_matches;
-    use reth_primitives::{Account, U256};
+    use reth_primitives::Account;
     use reth_provider::providers::StaticFileWriter;
     use reth_stages_api::StageUnitCheckpoint;
     use test_utils::*;
@@ -348,7 +353,7 @@ mod tests {
     mod test_utils {
         use super::*;
         use crate::test_utils::TestStageDB;
-        use reth_primitives::Address;
+        use alloy_primitives::Address;
         use reth_provider::DatabaseProviderFactory;
 
         pub(crate) struct AccountHashingTestRunner {

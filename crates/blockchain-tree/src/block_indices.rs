@@ -2,10 +2,11 @@
 
 use super::state::SidechainId;
 use crate::canonical_chain::CanonicalChain;
+use alloy_eips::BlockNumHash;
 use alloy_primitives::{BlockHash, BlockNumber};
 use linked_hash_set::LinkedHashSet;
 use reth_execution_types::Chain;
-use reth_primitives::{BlockNumHash, SealedBlockWithSenders};
+use reth_primitives::SealedBlockWithSenders;
 use std::collections::{btree_map, hash_map, BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Internal indices of the blocks and chains.
@@ -376,8 +377,9 @@ impl BlockIndices {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_consensus::Header;
     use alloy_primitives::B256;
-    use reth_primitives::{Header, SealedBlock, SealedHeader};
+    use reth_primitives::{SealedBlock, SealedHeader};
 
     #[test]
     fn pending_block_num_hash_returns_none_if_no_fork() {
@@ -533,7 +535,7 @@ mod tests {
         block_indices.insert_non_fork_block(block_number_2, block_hash_3, chain_id_2);
 
         // Block number 1 should have two block hashes associated with it.
-        let mut expected_hashes_for_block_1 = HashSet::new();
+        let mut expected_hashes_for_block_1 = HashSet::default();
         expected_hashes_for_block_1.insert(block_hash_1);
         expected_hashes_for_block_1.insert(block_hash_2);
         assert_eq!(
@@ -570,23 +572,23 @@ mod tests {
 
         // Define blocks with their numbers and parent hashes.
         let block_1 = SealedBlockWithSenders {
-            block: SealedBlock {
-                header: SealedHeader::new(
+            block: SealedBlock::new(
+                SealedHeader::new(
                     Header { parent_hash, number: 1, ..Default::default() },
                     block_hash_1,
                 ),
-                ..Default::default()
-            },
+                Default::default(),
+            ),
             ..Default::default()
         };
         let block_2 = SealedBlockWithSenders {
-            block: SealedBlock {
-                header: SealedHeader::new(
+            block: SealedBlock::new(
+                SealedHeader::new(
                     Header { parent_hash: block_hash_1, number: 2, ..Default::default() },
                     block_hash_2,
                 ),
-                ..Default::default()
-            },
+                Default::default(),
+            ),
             ..Default::default()
         };
 
@@ -601,11 +603,11 @@ mod tests {
         assert_eq!(block_indices.blocks_to_chain.get(&block_hash_2), Some(&chain_id));
 
         // Check that block numbers map to their respective hashes.
-        let mut expected_hashes_1 = HashSet::new();
+        let mut expected_hashes_1 = HashSet::default();
         expected_hashes_1.insert(block_hash_1);
         assert_eq!(block_indices.block_number_to_block_hashes.get(&1), Some(&expected_hashes_1));
 
-        let mut expected_hashes_2 = HashSet::new();
+        let mut expected_hashes_2 = HashSet::default();
         expected_hashes_2.insert(block_hash_2);
         assert_eq!(block_indices.block_number_to_block_hashes.get(&2), Some(&expected_hashes_2));
 

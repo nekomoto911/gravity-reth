@@ -42,6 +42,7 @@ use utils::*;
 mod tests {
     use super::*;
     use crate::test_utils::{StorageKind, TestStageDB};
+    use alloy_primitives::{address, hex_literal::hex, keccak256, BlockNumber, B256, U256};
     use alloy_rlp::Decodable;
     use reth_chainspec::ChainSpecBuilder;
     use reth_db::{
@@ -55,15 +56,13 @@ mod tests {
     };
     use reth_evm_ethereum::execute::EthExecutorProvider;
     use reth_exex::ExExManagerHandle;
-    use reth_primitives::{
-        address, hex_literal::hex, keccak256, Account, BlockNumber, Bytecode, SealedBlock,
-        StaticFileSegment, B256, U256,
-    };
+    use reth_primitives::{Account, Bytecode, SealedBlock, StaticFileSegment};
     use reth_provider::{
         providers::{StaticFileProvider, StaticFileWriter},
         test_utils::MockNodeTypesWithDB,
-        AccountExtReader, BlockReader, DatabaseProviderFactory, ProviderFactory, ProviderResult,
-        ReceiptProvider, StageCheckpointWriter, StaticFileProviderFactory, StorageReader,
+        AccountExtReader, BlockBodyIndicesProvider, DatabaseProviderFactory, ProviderFactory,
+        ProviderResult, ReceiptProvider, StageCheckpointWriter, StaticFileProviderFactory,
+        StorageReader,
     };
     use reth_prune_types::{PruneMode, PruneModes};
     use reth_stages_api::{
@@ -265,11 +264,11 @@ mod tests {
         );
         db.insert_blocks(blocks.iter(), StorageKind::Static)?;
 
-        let mut receipts = Vec::new();
+        let mut receipts = Vec::with_capacity(blocks.len());
         let mut tx_num = 0u64;
         for block in &blocks {
-            let mut block_receipts = Vec::with_capacity(block.body.len());
-            for transaction in &block.body {
+            let mut block_receipts = Vec::with_capacity(block.transaction_count());
+            for transaction in &block.body().transactions {
                 block_receipts.push((tx_num, random_receipt(&mut rng, transaction, Some(0))));
                 tx_num += 1;
             }
@@ -298,8 +297,8 @@ mod tests {
     ) {
         // We recreate the static file provider, since consistency heals are done on fetching the
         // writer for the first time.
-        let static_file_provider =
-            StaticFileProvider::read_write(db.factory.static_file_provider().path()).unwrap();
+        let mut static_file_provider = db.factory.static_file_provider();
+        static_file_provider = StaticFileProvider::read_write(static_file_provider.path()).unwrap();
 
         // Simulate corruption by removing `prune_count` rows from the data file without updating
         // its offset list and configuration.
@@ -316,12 +315,13 @@ mod tests {
 
         // We recreate the static file provider, since consistency heals are done on fetching the
         // writer for the first time.
-        assert_eq!(
-            StaticFileProvider::read_write(db.factory.static_file_provider().path())
-                .unwrap()
+        let mut static_file_provider = db.factory.static_file_provider();
+        static_file_provider = StaticFileProvider::read_write(static_file_provider.path()).unwrap();
+        assert!(matches!(
+            static_file_provider
                 .check_consistency(&db.factory.database_provider_ro().unwrap(), is_full_node,),
-            Ok(expected)
-        );
+            Ok(e) if e == expected
+        ));
     }
 
     /// Saves a checkpoint with `checkpoint_block_number` and compare the check consistency result
@@ -338,12 +338,12 @@ mod tests {
             .unwrap();
         provider_rw.commit().unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             db.factory
                 .static_file_provider()
                 .check_consistency(&db.factory.database_provider_ro().unwrap(), false,),
-            Ok(expected)
-        );
+            Ok(e) if e == expected
+        ));
     }
 
     /// Inserts a dummy value at key and compare the check consistency result against the expected
@@ -360,12 +360,12 @@ mod tests {
         cursor.insert(key, Default::default()).unwrap();
         provider_rw.commit().unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             db.factory
                 .static_file_provider()
                 .check_consistency(&db.factory.database_provider_ro().unwrap(), false),
-            Ok(expected)
-        );
+            Ok(e) if e == expected
+        ));
     }
 
     #[test]
@@ -373,10 +373,10 @@ mod tests {
         let db = seed_data(90).unwrap();
         let db_provider = db.factory.database_provider_ro().unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             db.factory.static_file_provider().check_consistency(&db_provider, false),
             Ok(None)
-        );
+        ));
     }
 
     #[test]

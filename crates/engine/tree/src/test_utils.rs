@@ -1,6 +1,7 @@
+use alloy_primitives::B256;
 use reth_chainspec::ChainSpec;
 use reth_network_p2p::test_utils::TestFullBlockClient;
-use reth_primitives::{BlockBody, SealedHeader, B256};
+use reth_primitives::{BlockBody, SealedHeader};
 use reth_provider::{
     test_utils::{create_test_provider_factory_with_chain_spec, MockNodeTypesWithDB},
     ExecutionOutcome,
@@ -75,7 +76,7 @@ pub fn insert_headers_into_client(
         header.parent_hash = hash;
         header.number += 1;
         header.timestamp += 1;
-        sealed_header = header.seal_slow();
+        sealed_header = SealedHeader::seal(header);
         client.insert(sealed_header.clone(), body.clone());
     }
 }

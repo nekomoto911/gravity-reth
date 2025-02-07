@@ -2,16 +2,15 @@
 //! and [`NewPooledTransactionHashes68`](reth_eth_wire::NewPooledTransactionHashes68)
 //! announcements. Validation and filtering of announcements is network dependent.
 
-use std::{fmt, fmt::Display, mem};
-
 use crate::metrics::{AnnouncedTxTypesMetrics, TxTypesCounter};
-use alloy_primitives::{Signature, TxHash};
+use alloy_primitives::{PrimitiveSignature as Signature, TxHash};
 use derive_more::{Deref, DerefMut};
 use reth_eth_wire::{
     DedupPayload, Eth68TxMetadata, HandleMempoolData, PartiallyValidData, ValidAnnouncementData,
     MAX_MESSAGE_SIZE,
 };
 use reth_primitives::TxType;
+use std::{fmt, fmt::Display, mem};
 use tracing::trace;
 
 /// The size of a decoded signature in bytes.
@@ -43,7 +42,7 @@ pub trait ValidateTx68 {
 
     /// Returns the reasonable minimum encoded transaction length, if any. This property is not
     /// spec'ed out but can be inferred by looking at which
-    /// [`reth_primitives::PooledTransactionsElement`] will successfully pass decoding
+    /// [`reth_primitives::PooledTransaction`] will successfully pass decoding
     /// for any given transaction type.
     fn min_encoded_tx_length(&self, ty: TxType) -> Option<usize>;
 
@@ -336,7 +335,6 @@ impl FilterAnnouncement for EthMessageFilter {
 #[cfg(test)]
 mod test {
     use super::*;
-
     use alloy_primitives::B256;
     use reth_eth_wire::{NewPooledTransactionHashes66, NewPooledTransactionHashes68};
     use std::{collections::HashMap, str::FromStr};
@@ -386,7 +384,7 @@ mod test {
 
         assert_eq!(outcome, FilterOutcome::ReportPeer);
 
-        let mut expected_data = HashMap::new();
+        let mut expected_data = HashMap::default();
         expected_data.insert(hashes[1], Some((types[1], sizes[1])));
 
         assert_eq!(expected_data, valid_data.into_data())
@@ -426,7 +424,7 @@ mod test {
 
         assert_eq!(outcome, FilterOutcome::Ok);
 
-        let mut expected_data = HashMap::new();
+        let mut expected_data = HashMap::default();
         expected_data.insert(hashes[2], Some((types[2], sizes[2])));
 
         assert_eq!(expected_data, valid_data.into_data())
@@ -465,7 +463,7 @@ mod test {
 
         assert_eq!(outcome, FilterOutcome::ReportPeer);
 
-        let mut expected_data = HashMap::new();
+        let mut expected_data = HashMap::default();
         expected_data.insert(hashes[3], Some((types[3], sizes[3])));
         expected_data.insert(hashes[0], Some((types[0], sizes[0])));
 
@@ -509,7 +507,7 @@ mod test {
 
         assert_eq!(outcome, FilterOutcome::ReportPeer);
 
-        let mut expected_data = HashMap::new();
+        let mut expected_data = HashMap::default();
         expected_data.insert(hashes[1], None);
         expected_data.insert(hashes[0], None);
 

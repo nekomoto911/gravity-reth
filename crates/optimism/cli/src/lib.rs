@@ -27,7 +27,13 @@ pub mod commands;
 /// made for op-erigon's import needs).
 pub mod receipt_file_codec;
 
+/// OVM block, same as EVM block at bedrock, except for signature of deposit transaction
+/// not having a signature back then.
+/// Enables decoding and encoding `Block` types within file contexts.
+pub mod ovm_file_codec;
+
 pub use commands::{import::ImportOpCommand, import_receipts::ImportReceiptsOpCommand};
+use reth_optimism_chainspec::OpChainSpec;
 
 use std::{ffi::OsString, fmt, sync::Arc};
 
@@ -35,30 +41,32 @@ use chainspec::OpChainSpecParser;
 use clap::{command, value_parser, Parser};
 use commands::Commands;
 use futures_util::Future;
-use reth_chainspec::ChainSpec;
+use reth_chainspec::EthChainSpec;
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_commands::node::NoArgs;
 use reth_cli_runner::CliRunner;
 use reth_db::DatabaseEnv;
-use reth_evm_optimism::OpExecutorProvider;
 use reth_node_builder::{NodeBuilder, WithLaunchContext};
 use reth_node_core::{
     args::LogArgs,
     version::{LONG_VERSION, SHORT_VERSION},
 };
-use reth_node_optimism::OptimismNode;
+use reth_optimism_evm::OpExecutorProvider;
+use reth_optimism_node::{OpNetworkPrimitives, OpNode};
 use reth_tracing::FileWorkerGuard;
 use tracing::info;
+
+// This allows us to manually enable node metrics features, required for proper jemalloc metric
+// reporting
+use reth_node_metrics as _;
+use reth_node_metrics::recorder::install_prometheus_recorder;
 
 /// The main op-reth cli interface.
 ///
 /// This is the entrypoint to the executable.
 #[derive(Debug, Parser)]
 #[command(author, version = SHORT_VERSION, long_version = LONG_VERSION, about = "Reth", long_about = None)]
-pub struct Cli<
-    Spec: ChainSpecParser<ChainSpec = ChainSpec> = OpChainSpecParser,
-    Ext: clap::Args + fmt::Debug = NoArgs,
-> {
+pub struct Cli<Spec: ChainSpecParser = OpChainSpecParser, Ext: clap::Args + fmt::Debug = NoArgs> {
     /// The command to run
     #[command(subcommand)]
     command: Commands<Spec, Ext>,
@@ -112,9 +120,9 @@ impl Cli {
     }
 }
 
-impl<Spec, Ext> Cli<Spec, Ext>
+impl<C, Ext> Cli<C, Ext>
 where
-    Spec: ChainSpecParser<ChainSpec = ChainSpec>,
+    C: ChainSpecParser<ChainSpec = OpChainSpec>,
     Ext: clap::Args + fmt::Debug,
 {
     /// Execute the configured cli command.
@@ -123,15 +131,18 @@ where
     /// [`NodeCommand`](reth_cli_commands::node::NodeCommand).
     pub fn run<L, Fut>(mut self, launcher: L) -> eyre::Result<()>
     where
-        L: FnOnce(WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, ChainSpec>>, Ext) -> Fut,
+        L: FnOnce(WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, C::ChainSpec>>, Ext) -> Fut,
         Fut: Future<Output = eyre::Result<()>>,
     {
         // add network name to logs dir
         self.logs.log_file_directory =
-            self.logs.log_file_directory.join(self.chain.chain.to_string());
+            self.logs.log_file_directory.join(self.chain.chain().to_string());
 
         let _guard = self.init_tracing()?;
         info!(target: "reth::cli", "Initialized tracing, debug log directory: {}", self.logs.log_file_directory);
+
+        // Install the prometheus recorder to be sure to record all metrics
+        let _ = install_prometheus_recorder();
 
         let runner = CliRunner::default();
         match self.command {
@@ -139,30 +150,33 @@ where
                 runner.run_command_until_exit(|ctx| command.execute(ctx, launcher))
             }
             Commands::Init(command) => {
-                runner.run_blocking_until_ctrl_c(command.execute::<OptimismNode>())
+                runner.run_blocking_until_ctrl_c(command.execute::<OpNode>())
             }
             Commands::InitState(command) => {
-                runner.run_blocking_until_ctrl_c(command.execute::<OptimismNode>())
+                runner.run_blocking_until_ctrl_c(command.execute::<OpNode>())
             }
             Commands::ImportOp(command) => {
-                runner.run_blocking_until_ctrl_c(command.execute::<OptimismNode>())
+                runner.run_blocking_until_ctrl_c(command.execute::<OpNode>())
             }
             Commands::ImportReceiptsOp(command) => {
-                runner.run_blocking_until_ctrl_c(command.execute::<OptimismNode>())
+                runner.run_blocking_until_ctrl_c(command.execute::<OpNode>())
             }
             Commands::DumpGenesis(command) => runner.run_blocking_until_ctrl_c(command.execute()),
-            Commands::Db(command) => {
-                runner.run_blocking_until_ctrl_c(command.execute::<OptimismNode>())
-            }
+            Commands::Db(command) => runner.run_blocking_until_ctrl_c(command.execute::<OpNode>()),
             Commands::Stage(command) => runner.run_command_until_exit(|ctx| {
-                command.execute::<OptimismNode, _, _>(ctx, OpExecutorProvider::optimism)
+                command
+                    .execute::<OpNode, _, _, OpNetworkPrimitives>(ctx, OpExecutorProvider::optimism)
             }),
-            Commands::P2P(command) => runner.run_until_ctrl_c(command.execute()),
+            Commands::P2P(command) => {
+                runner.run_until_ctrl_c(command.execute::<OpNetworkPrimitives>())
+            }
             Commands::Config(command) => runner.run_until_ctrl_c(command.execute()),
             Commands::Recover(command) => {
-                runner.run_command_until_exit(|ctx| command.execute::<OptimismNode>(ctx))
+                runner.run_command_until_exit(|ctx| command.execute::<OpNode>(ctx))
             }
-            Commands::Prune(command) => runner.run_until_ctrl_c(command.execute::<OptimismNode>()),
+            Commands::Prune(command) => runner.run_until_ctrl_c(command.execute::<OpNode>()),
+            #[cfg(feature = "dev")]
+            Commands::TestVectors(command) => runner.run_until_ctrl_c(command.execute()),
         }
     }
 
@@ -173,5 +187,31 @@ where
     pub fn init_tracing(&self) -> eyre::Result<Option<FileWorkerGuard>> {
         let guard = self.logs.init_tracing()?;
         Ok(guard)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::chainspec::OpChainSpecParser;
+    use clap::Parser;
+    use reth_cli_commands::{node::NoArgs, NodeCommand};
+    use reth_optimism_chainspec::OP_DEV;
+
+    #[test]
+    fn parse_dev() {
+        let cmd = NodeCommand::<OpChainSpecParser, NoArgs>::parse_from(["op-reth", "--dev"]);
+        let chain = OP_DEV.clone();
+        assert_eq!(cmd.chain.chain, chain.chain);
+        assert_eq!(cmd.chain.genesis_hash, chain.genesis_hash);
+        assert_eq!(
+            cmd.chain.paris_block_and_final_difficulty,
+            chain.paris_block_and_final_difficulty
+        );
+        assert_eq!(cmd.chain.hardforks, chain.hardforks);
+
+        assert!(cmd.rpc.http);
+        assert!(cmd.network.discovery.disable_discovery);
+
+        assert!(cmd.dev.dev);
     }
 }

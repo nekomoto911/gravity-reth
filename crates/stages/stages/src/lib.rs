@@ -17,7 +17,7 @@
 //! # use reth_downloaders::headers::reverse_headers::ReverseHeadersDownloaderBuilder;
 //! # use reth_network_p2p::test_utils::{TestBodiesClient, TestHeadersClient};
 //! # use reth_evm_ethereum::execute::EthExecutorProvider;
-//! # use reth_primitives::B256;
+//! # use alloy_primitives::B256;
 //! # use reth_chainspec::MAINNET;
 //! # use reth_prune_types::PruneModes;
 //! # use reth_network_peers::PeerId;
@@ -37,7 +37,7 @@
 //! # let consensus: Arc<dyn Consensus> = Arc::new(TestConsensus::default());
 //! # let headers_downloader = ReverseHeadersDownloaderBuilder::default().build(
 //! #    Arc::new(TestHeadersClient::default()),
-//! #    consensus.clone()
+//! #    consensus.clone().as_header_validator()
 //! # );
 //! # let provider_factory = create_test_provider_factory();
 //! # let bodies_downloader = BodiesDownloaderBuilder::default().build(

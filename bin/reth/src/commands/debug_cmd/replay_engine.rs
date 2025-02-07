@@ -8,21 +8,24 @@ use reth_blockchain_tree::{
 };
 use reth_chainspec::ChainSpec;
 use reth_cli::chainspec::ChainSpecParser;
-use reth_cli_commands::common::{AccessRights, Environment, EnvironmentArgs};
+use reth_cli_commands::common::{AccessRights, CliNodeTypes, Environment, EnvironmentArgs};
 use reth_cli_runner::CliContext;
 use reth_cli_util::get_secret_key;
 use reth_config::Config;
-use reth_consensus::Consensus;
+use reth_consensus::FullConsensus;
 use reth_db::DatabaseEnv;
 use reth_engine_util::engine_store::{EngineMessageStore, StoredEngineApiMessage};
+use reth_ethereum_payload_builder::EthereumBuilderConfig;
 use reth_fs_util as fs;
 use reth_network::{BlockDownloaderProvider, NetworkHandle};
 use reth_network_api::NetworkInfo;
-use reth_node_api::{NodeTypesWithDB, NodeTypesWithDBAdapter, NodeTypesWithEngine};
+use reth_node_api::{EngineApiMessageVersion, NodePrimitives, NodeTypesWithDBAdapter};
 use reth_node_ethereum::{EthEngineTypes, EthEvmConfig, EthExecutorProvider};
 use reth_payload_builder::{PayloadBuilderHandle, PayloadBuilderService};
+use reth_primitives::EthPrimitives;
 use reth_provider::{
-    providers::BlockchainProvider, CanonStateSubscriptions, ChainSpecProvider, ProviderFactory,
+    providers::{BlockchainProvider, ProviderNodeTypes},
+    CanonStateSubscriptions, ChainSpecProvider, ProviderFactory,
 };
 use reth_prune::PruneModes;
 use reth_stages::Pipeline;
@@ -54,7 +57,16 @@ pub struct Command<C: ChainSpecParser> {
 }
 
 impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
-    async fn build_network<N: NodeTypesWithDB<ChainSpec = C::ChainSpec>>(
+    async fn build_network<
+        N: ProviderNodeTypes<
+            ChainSpec = C::ChainSpec,
+            Primitives: NodePrimitives<
+                Block = reth_primitives::Block,
+                Receipt = reth_primitives::Receipt,
+                BlockHeader = reth_primitives::Header,
+            >,
+        >,
+    >(
         &self,
         config: &Config,
         task_executor: TaskExecutor,
@@ -77,7 +89,7 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
 
     /// Execute `debug replay-engine` command
     pub async fn execute<
-        N: NodeTypesWithEngine<Engine = EthEngineTypes, ChainSpec = C::ChainSpec>,
+        N: CliNodeTypes<Engine = EthEngineTypes, Primitives = EthPrimitives, ChainSpec = C::ChainSpec>,
     >(
         self,
         ctx: CliContext,
@@ -85,7 +97,7 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
         let Environment { provider_factory, config, data_dir } =
             self.env.init::<N>(AccessRights::RW)?;
 
-        let consensus: Arc<dyn Consensus> =
+        let consensus: Arc<dyn FullConsensus> =
             Arc::new(EthBeaconConsensus::new(provider_factory.chain_spec()));
 
         let executor = EthExecutorProvider::ethereum(provider_factory.chain_spec());
@@ -115,6 +127,7 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
         // Set up payload builder
         let payload_builder = reth_ethereum_payload_builder::EthereumPayloadBuilder::new(
             EthEvmConfig::new(provider_factory.chain_spec()),
+            EthereumBuilderConfig::new(Default::default()),
         );
 
         let payload_generator = BasicPayloadJobGenerator::with_builder(
@@ -122,7 +135,6 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
             NoopTransactionPool::default(),
             ctx.task_executor.clone(),
             BasicPayloadJobGeneratorConfig::default(),
-            provider_factory.chain_spec(),
             payload_builder,
         );
 
@@ -167,12 +179,17 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
             debug!(target: "reth::cli", filepath = %filepath.display(), ?message, "Forwarding Engine API message");
             match message {
                 StoredEngineApiMessage::ForkchoiceUpdated { state, payload_attrs } => {
-                    let response =
-                        beacon_engine_handle.fork_choice_updated(state, payload_attrs).await?;
+                    let response = beacon_engine_handle
+                        .fork_choice_updated(
+                            state,
+                            payload_attrs,
+                            EngineApiMessageVersion::default(),
+                        )
+                        .await?;
                     debug!(target: "reth::cli", ?response, "Received for forkchoice updated");
                 }
-                StoredEngineApiMessage::NewPayload { payload, cancun_fields } => {
-                    let response = beacon_engine_handle.new_payload(payload, cancun_fields).await?;
+                StoredEngineApiMessage::NewPayload { payload, sidecar } => {
+                    let response = beacon_engine_handle.new_payload(payload, sidecar).await?;
                     debug!(target: "reth::cli", ?response, "Received for new payload");
                 }
             };

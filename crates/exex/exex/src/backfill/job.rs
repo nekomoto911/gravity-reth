@@ -4,11 +4,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+use alloy_consensus::BlockHeader;
+use alloy_primitives::BlockNumber;
 use reth_evm::execute::{
     BatchExecutor, BlockExecutionError, BlockExecutionOutput, BlockExecutorProvider, Executor,
 };
-use reth_primitives::{Block, BlockNumber, BlockWithSenders, Receipt};
-use reth_primitives_traits::format_gas_throughput;
+use reth_node_api::{Block as _, BlockBody as _, NodePrimitives};
+use reth_primitives::{BlockExt, BlockWithSenders, Receipt};
+use reth_primitives_traits::{format_gas_throughput, SignedTransaction};
 use reth_provider::{
     BlockReader, Chain, HeaderProvider, ProviderError, StateProviderFactory, TransactionVariant,
 };
@@ -17,10 +20,13 @@ use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::ExecutionStageThresholds;
 use reth_tracing::tracing::{debug, trace};
 
+pub(super) type BackfillJobResult<T> = Result<T, BlockExecutionError>;
+
 /// Backfill job started for a specific range.
 ///
 /// It implements [`Iterator`] that executes blocks in batches according to the provided thresholds
-/// and yields [`Chain`]
+/// and yields [`Chain`]. In other words, this iterator can yield multiple items for the given range
+/// depending on the configured thresholds.
 #[derive(Debug)]
 pub struct BackfillJob<E, P> {
     pub(crate) executor: E,
@@ -33,10 +39,10 @@ pub struct BackfillJob<E, P> {
 
 impl<E, P> Iterator for BackfillJob<E, P>
 where
-    E: BlockExecutorProvider,
-    P: HeaderProvider + BlockReader + StateProviderFactory,
+    E: BlockExecutorProvider<Primitives: NodePrimitives<Block = P::Block>>,
+    P: HeaderProvider + BlockReader<Transaction: SignedTransaction> + StateProviderFactory,
 {
-    type Item = Result<Chain, BlockExecutionError>;
+    type Item = BackfillJobResult<Chain<E::Primitives>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.range.is_empty() {
@@ -49,8 +55,8 @@ where
 
 impl<E, P> BackfillJob<E, P>
 where
-    E: BlockExecutorProvider,
-    P: BlockReader + HeaderProvider + StateProviderFactory,
+    E: BlockExecutorProvider<Primitives: NodePrimitives<Block = P::Block>>,
+    P: BlockReader<Transaction: SignedTransaction> + HeaderProvider + StateProviderFactory,
 {
     /// Converts the backfill job into a single block backfill job.
     pub fn into_single_blocks(self) -> SingleBlockBackfillJob<E, P> {
@@ -58,11 +64,17 @@ where
     }
 
     /// Converts the backfill job into a stream.
-    pub fn into_stream(self) -> StreamBackfillJob<E, P, Chain> {
+    pub fn into_stream(self) -> StreamBackfillJob<E, P, Chain<E::Primitives>> {
         self.into()
     }
 
-    fn execute_range(&mut self) -> Result<Chain, BlockExecutionError> {
+    fn execute_range(&mut self) -> BackfillJobResult<Chain<E::Primitives>> {
+        debug!(
+            target: "exex::backfill",
+            range = ?self.range,
+            "Executing block range"
+        );
+
         let mut executor = self.executor.batch_executor(StateProviderDatabase::new(
             self.provider.history_by_block_number(self.range.start().saturating_sub(1))?,
         ));
@@ -78,11 +90,6 @@ where
             // Fetch the block
             let fetch_block_start = Instant::now();
 
-            let td = self
-                .provider
-                .header_td_by_number(block_number)?
-                .ok_or_else(|| ProviderError::HeaderNotFound(block_number.into()))?;
-
             // we need the block's transactions along with their hashes
             let block = self
                 .provider
@@ -91,33 +98,27 @@ where
 
             fetch_block_duration += fetch_block_start.elapsed();
 
-            cumulative_gas += block.gas_used;
+            cumulative_gas += block.gas_used();
 
             // Configure the executor to use the current state.
-            trace!(target: "exex::backfill", number = block_number, txs = block.body.len(), "Executing block");
+            trace!(target: "exex::backfill", number = block_number, txs = block.body().transactions().len(), "Executing block");
 
             // Execute the block
             let execute_start = Instant::now();
 
             // Unseal the block for execution
             let (block, senders) = block.into_components();
-            let (unsealed_header, hash) = block.header.split();
-            let block = Block {
-                header: unsealed_header,
-                body: block.body,
-                ommers: block.ommers,
-                withdrawals: block.withdrawals,
-                requests: block.requests,
-            }
-            .with_senders_unchecked(senders);
+            let (header, body) = block.split_header_body();
+            let (unsealed_header, hash) = header.split();
+            let block = P::Block::new(unsealed_header, body).with_senders_unchecked(senders);
 
-            executor.execute_and_verify_one((&block, td).into())?;
+            executor.execute_and_verify_one(&block)?;
             execution_duration += execute_start.elapsed();
 
             // TODO(alexey): report gas metrics using `block.header.gas_used`
 
             // Seal the block back and save it
-            blocks.push(block.seal(hash));
+            blocks.push(block.seal_unchecked(hash));
 
             // Check if we should commit now
             let bundle_size_hint = executor.size_hint().unwrap_or_default() as u64;
@@ -131,7 +132,7 @@ where
             }
         }
 
-        let last_block_number = blocks.last().expect("blocks should not be empty").number;
+        let last_block_number = blocks.last().expect("blocks should not be empty").number();
         debug!(
             target: "exex::backfill",
             range = ?*self.range.start()..=last_block_number,
@@ -161,10 +162,13 @@ pub struct SingleBlockBackfillJob<E, P> {
 
 impl<E, P> Iterator for SingleBlockBackfillJob<E, P>
 where
-    E: BlockExecutorProvider,
+    E: BlockExecutorProvider<Primitives: NodePrimitives<Block = P::Block>>,
     P: HeaderProvider + BlockReader + StateProviderFactory,
 {
-    type Item = Result<(BlockWithSenders, BlockExecutionOutput<Receipt>), BlockExecutionError>;
+    type Item = BackfillJobResult<(
+        BlockWithSenders<P::Block>,
+        BlockExecutionOutput<<E::Primitives as NodePrimitives>::Receipt>,
+    )>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.range.next().map(|block_number| self.execute_block(block_number))
@@ -173,7 +177,7 @@ where
 
 impl<E, P> SingleBlockBackfillJob<E, P>
 where
-    E: BlockExecutorProvider,
+    E: BlockExecutorProvider<Primitives: NodePrimitives<Block = P::Block>>,
     P: HeaderProvider + BlockReader + StateProviderFactory,
 {
     /// Converts the single block backfill job into a stream.
@@ -183,15 +187,14 @@ where
         self.into()
     }
 
+    #[expect(clippy::type_complexity)]
     pub(crate) fn execute_block(
         &self,
         block_number: u64,
-    ) -> Result<(BlockWithSenders, BlockExecutionOutput<Receipt>), BlockExecutionError> {
-        let td = self
-            .provider
-            .header_td_by_number(block_number)?
-            .ok_or_else(|| ProviderError::HeaderNotFound(block_number.into()))?;
-
+    ) -> BackfillJobResult<(
+        BlockWithSenders<P::Block>,
+        BlockExecutionOutput<<E::Primitives as NodePrimitives>::Receipt>,
+    )> {
         // Fetch the block with senders for execution.
         let block_with_senders = self
             .provider
@@ -203,9 +206,9 @@ where
             self.provider.history_by_block_number(block_number.saturating_sub(1))?,
         ));
 
-        trace!(target: "exex::backfill", number = block_number, txs = block_with_senders.block.body.len(), "Executing block");
+        trace!(target: "exex::backfill", number = block_number, txs = block_with_senders.block.body().transactions().len(), "Executing block");
 
-        let block_execution_output = executor.execute((&block_with_senders, td).into())?;
+        let block_execution_output = executor.execute(&block_with_senders)?;
 
         Ok((block_with_senders, block_execution_output))
     }
@@ -224,8 +227,6 @@ impl<E, P> From<BackfillJob<E, P>> for SingleBlockBackfillJob<E, P> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use crate::{
         backfill::test_utils::{blocks_and_execution_outputs, chain_spec, to_execution_outcome},
         BackfillJobFactory,
@@ -233,12 +234,13 @@ mod tests {
     use reth_blockchain_tree::noop::NoopBlockchainTree;
     use reth_db_common::init::init_genesis;
     use reth_evm_ethereum::execute::EthExecutorProvider;
-    use reth_primitives::public_key_to_address;
+    use reth_primitives_traits::crypto::secp256k1::public_key_to_address;
     use reth_provider::{
         providers::BlockchainProvider, test_utils::create_test_provider_factory_with_chain_spec,
     };
     use reth_testing_utils::generators;
     use secp256k1::Keypair;
+    use std::sync::Arc;
 
     #[test]
     fn test_backfill() -> eyre::Result<()> {

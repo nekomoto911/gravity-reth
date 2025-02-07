@@ -1,10 +1,12 @@
 //! Implementation of [`BlockchainTree`]
 
 use crate::{
+    externals::TreeNodeTypes,
     metrics::{MakeCanonicalAction, MakeCanonicalDurationsRecorder, TreeMetrics},
     state::{SidechainId, TreeState},
     AppendableChain, BlockIndices, BlockchainTreeConfig, ExecutionData, TreeExternals,
 };
+use alloy_eips::{BlockNumHash, ForkBlock};
 use alloy_primitives::{BlockHash, BlockNumber, B256, U256};
 use reth_blockchain_tree_api::{
     error::{BlockchainTreeError, CanonicalError, InsertBlockError, InsertBlockErrorKind},
@@ -16,14 +18,14 @@ use reth_execution_errors::{BlockExecutionError, BlockValidationError};
 use reth_execution_types::{Chain, ExecutionOutcome};
 use reth_node_types::NodeTypesWithDB;
 use reth_primitives::{
-    BlockNumHash, EthereumHardfork, ForkBlock, GotExpected, Hardforks, Receipt, SealedBlock,
-    SealedBlockWithSenders, SealedHeader, StaticFileSegment,
+    EthereumHardfork, GotExpected, Hardforks, Receipt, SealedBlock, SealedBlockWithSenders,
+    SealedHeader, StaticFileSegment,
 };
 use reth_provider::{
-    providers::ProviderNodeTypes, BlockExecutionWriter, BlockNumReader, BlockWriter,
-    CanonStateNotification, CanonStateNotificationSender, CanonStateNotifications,
-    ChainSpecProvider, ChainSplit, ChainSplitTarget, DisplayBlocksChain, HeaderProvider,
-    ProviderError, StaticFileProviderFactory,
+    BlockExecutionWriter, BlockNumReader, BlockWriter, CanonStateNotification,
+    CanonStateNotificationSender, CanonStateNotifications, ChainSpecProvider, ChainSplit,
+    ChainSplitTarget, DBProvider, DisplayBlocksChain, HashedPostStateProvider, HeaderProvider,
+    ProviderError, StaticFileProviderFactory, StorageLocation,
 };
 use reth_stages_api::{MetricEvent, MetricEventsSender};
 use reth_storage_errors::provider::{ProviderResult, RootMismatch};
@@ -92,8 +94,8 @@ impl<N: NodeTypesWithDB, E> BlockchainTree<N, E> {
 
 impl<N, E> BlockchainTree<N, E>
 where
-    N: ProviderNodeTypes,
-    E: BlockExecutorProvider,
+    N: TreeNodeTypes,
+    E: BlockExecutorProvider<Primitives = N::Primitives>,
 {
     /// Builds the blockchain tree for the node.
     ///
@@ -112,9 +114,6 @@ where
     ///       is crucial for the correct execution of transactions.
     /// - `tree_config`: Configuration for the blockchain tree, including any parameters that affect
     ///   its structure or performance.
-    /// - `prune_modes`: Configuration for pruning old blockchain data. This helps in managing the
-    ///   storage space efficiently. It's important to validate this configuration to ensure it does
-    ///   not lead to unintended data loss.
     pub fn new(
         externals: TreeExternals<N, E>,
         config: BlockchainTreeConfig,
@@ -398,7 +397,6 @@ where
             .header_td(&block.parent_hash)?
             .ok_or_else(|| BlockchainTreeError::CanonicalChain { block_hash: block.parent_hash })?;
 
-        // Pass the parent total difficulty to short-circuit unnecessary calculations.
         if !self
             .externals
             .provider_factory
@@ -414,8 +412,9 @@ where
 
         let parent_header = provider
             .header(&block.parent_hash)?
-            .ok_or_else(|| BlockchainTreeError::CanonicalChain { block_hash: block.parent_hash })?
-            .seal(block.parent_hash);
+            .ok_or_else(|| BlockchainTreeError::CanonicalChain { block_hash: block.parent_hash })?;
+
+        let parent_sealed_header = SealedHeader::new(parent_header, block.parent_hash);
 
         let canonical_chain = self.state.block_indices.canonical_chain();
 
@@ -427,7 +426,7 @@ where
 
         let chain = AppendableChain::new_canonical_fork(
             block,
-            &parent_header,
+            &parent_sealed_header,
             canonical_chain.inner(),
             parent,
             &self.externals,
@@ -588,7 +587,7 @@ where
         // Find all forks of given block.
         let mut dependent_block =
             self.block_indices().fork_to_child().get(block).cloned().unwrap_or_default();
-        let mut dependent_chains = HashSet::new();
+        let mut dependent_chains = HashSet::default();
 
         while let Some(block) = dependent_block.pop_back() {
             // Get chain of dependent block.
@@ -698,21 +697,17 @@ where
         if let Err(e) =
             self.externals.consensus.validate_header_with_total_difficulty(block, U256::MAX)
         {
-            error!(
-                ?block,
-                "Failed to validate total difficulty for block {}: {e}",
-                block.header.hash()
-            );
+            error!(?block, "Failed to validate total difficulty for block {}: {e}", block.hash());
             return Err(e);
         }
 
         if let Err(e) = self.externals.consensus.validate_header(block) {
-            error!(?block, "Failed to validate header {}: {e}", block.header.hash());
+            error!(?block, "Failed to validate header {}: {e}", block.hash());
             return Err(e);
         }
 
         if let Err(e) = self.externals.consensus.validate_block_pre_execution(block) {
-            error!(?block, "Failed to validate block {}: {e}", block.header.hash());
+            error!(?block, "Failed to validate block {}: {e}", block.hash());
             return Err(e);
         }
 
@@ -900,6 +895,7 @@ where
         // check unconnected block buffer for children of the chains
         let mut all_chain_blocks = Vec::new();
         for chain in self.state.chains.values() {
+            all_chain_blocks.reserve_exact(chain.blocks().len());
             for (&number, block) in chain.blocks() {
                 all_chain_blocks.push(BlockNumHash { number, hash: block.hash() })
             }
@@ -993,7 +989,7 @@ where
             header = provider.header(hash)?
         }
 
-        Ok(header.map(|header| header.seal(*hash)))
+        Ok(header.map(|header| SealedHeader::new(header, *hash)))
     }
 
     /// Determines whether or not a block is canonical, checking the db if necessary.
@@ -1040,6 +1036,7 @@ where
                         })
                     },
                 )?;
+
             if !self
                 .externals
                 .provider_factory
@@ -1214,7 +1211,7 @@ where
         recorder: &mut MakeCanonicalDurationsRecorder,
     ) -> Result<(), CanonicalError> {
         let (blocks, state, chain_trie_updates) = chain.into_inner();
-        let hashed_state = state.hash_state_slow();
+        let hashed_state = self.externals.provider_factory.hashed_post_state(state.state());
         let prefix_sets = hashed_state.construct_prefix_sets().freeze();
         let hashed_state_sorted = hashed_state.into_sorted();
 
@@ -1243,7 +1240,7 @@ where
                     ))
                     .with_prefix_sets(prefix_sets)
                     .root_with_updates()
-                    .map_err(Into::<BlockValidationError>::into)?;
+                    .map_err(BlockValidationError::from)?;
                 let tip = blocks.tip();
                 if state_root != tip.state_root {
                     return Err(ProviderError::StateRootMismatch(Box::new(RootMismatch {
@@ -1332,7 +1329,7 @@ where
         info!(target: "blockchain_tree", "REORG: revert canonical from database by unwinding chain blocks {:?}", revert_range);
         // read block and execution result from database. and remove traces of block from tables.
         let blocks_and_execution = provider_rw
-            .take_block_and_execution_range(revert_range)
+            .take_block_and_execution_above(revert_until, StorageLocation::Database)
             .map_err(|e| CanonicalError::CanonicalRevert(e.to_string()))?;
 
         provider_rw.commit()?;
@@ -1374,8 +1371,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_consensus::{Header, TxEip1559, EMPTY_ROOT_HASH};
+    use alloy_eips::{
+        eip1559::{ETHEREUM_BLOCK_GAS_LIMIT, INITIAL_BASE_FEE},
+        eip4895::Withdrawals,
+    };
     use alloy_genesis::{Genesis, GenesisAccount};
-    use alloy_primitives::{keccak256, Address, B256};
+    use alloy_primitives::{keccak256, Address, PrimitiveSignature as Signature, B256};
     use assert_matches::assert_matches;
     use linked_hash_set::LinkedHashSet;
     use reth_chainspec::{ChainSpecBuilder, MAINNET, MIN_TRANSACTION_GAS};
@@ -1384,19 +1386,18 @@ mod tests {
     use reth_db_api::transaction::DbTxMut;
     use reth_evm::test_utils::MockExecutorProvider;
     use reth_evm_ethereum::execute::EthExecutorProvider;
+    use reth_node_types::FullNodePrimitives;
     use reth_primitives::{
-        constants::{EIP1559_INITIAL_BASE_FEE, EMPTY_ROOT_HASH},
         proofs::{calculate_receipt_root, calculate_transaction_root},
-        revm_primitives::AccountInfo,
-        Account, Header, Signature, Transaction, TransactionSigned, TransactionSignedEcRecovered,
-        TxEip1559, Withdrawals,
+        Account, BlockBody, RecoveredTx, Transaction, TransactionSigned,
     };
     use reth_provider::{
+        providers::ProviderNodeTypes,
         test_utils::{
             blocks::BlockchainTestData, create_test_provider_factory_with_chain_spec,
             MockNodeTypesWithDB,
         },
-        ProviderFactory,
+        ProviderFactory, StorageLocation,
     };
     use reth_stages_api::StageCheckpoint;
     use reth_trie::{root::state_root_unhashed, StateRoot};
@@ -1420,7 +1421,17 @@ mod tests {
         TreeExternals::new(provider_factory, consensus, executor_factory)
     }
 
-    fn setup_genesis<N: ProviderNodeTypes>(factory: &ProviderFactory<N>, mut genesis: SealedBlock) {
+    fn setup_genesis<
+        N: ProviderNodeTypes<
+            Primitives: FullNodePrimitives<
+                BlockBody = reth_primitives::BlockBody,
+                BlockHeader = reth_primitives::Header,
+            >,
+        >,
+    >(
+        factory: &ProviderFactory<N>,
+        mut genesis: SealedBlock,
+    ) {
         // insert genesis to db.
 
         genesis.header.set_block_number(10);
@@ -1505,7 +1516,8 @@ mod tests {
                 assert_eq!(*tree.state.block_indices.blocks_to_chain(), block_to_chain);
             }
             if let Some(fork_to_child) = self.fork_to_child {
-                let mut x: HashMap<BlockHash, LinkedHashSet<BlockHash>> = HashMap::new();
+                let mut x: HashMap<BlockHash, LinkedHashSet<BlockHash>> =
+                    HashMap::with_capacity(fork_to_child.len());
                 for (key, hash_set) in fork_to_child {
                     x.insert(key, hash_set.into_iter().collect());
                 }
@@ -1550,6 +1562,7 @@ mod tests {
                     SealedBlock::new(chain_spec.sealed_genesis_header(), Default::default())
                         .try_seal_with_senders()
                         .unwrap(),
+                    StorageLocation::Database,
                 )
                 .unwrap();
             let account = Account { balance: initial_signer_balance, ..Default::default() };
@@ -1558,28 +1571,29 @@ mod tests {
             provider_rw.commit().unwrap();
         }
 
-        let single_tx_cost = U256::from(EIP1559_INITIAL_BASE_FEE * MIN_TRANSACTION_GAS);
-        let mock_tx = |nonce: u64| -> TransactionSignedEcRecovered {
-            TransactionSigned::from_transaction_and_signature(
+        let single_tx_cost = U256::from(INITIAL_BASE_FEE * MIN_TRANSACTION_GAS);
+        let mock_tx = |nonce: u64| -> RecoveredTx<_> {
+            TransactionSigned::new_unhashed(
                 Transaction::Eip1559(TxEip1559 {
                     chain_id: chain_spec.chain.id(),
                     nonce,
-                    gas_limit: MIN_TRANSACTION_GAS as u128,
+                    gas_limit: MIN_TRANSACTION_GAS,
                     to: Address::ZERO.into(),
-                    max_fee_per_gas: EIP1559_INITIAL_BASE_FEE as u128,
+                    max_fee_per_gas: INITIAL_BASE_FEE as u128,
                     ..Default::default()
                 }),
-                Signature::default(),
+                Signature::test_signature(),
             )
             .with_signer(signer)
         };
 
         let mock_block = |number: u64,
                           parent: Option<B256>,
-                          body: Vec<TransactionSignedEcRecovered>,
+                          body: Vec<RecoveredTx<TransactionSigned>>,
                           num_of_signer_txs: u64|
          -> SealedBlockWithSenders {
-            let transactions_root = calculate_transaction_root(&body);
+            let signed_body = body.clone().into_iter().map(|tx| tx.into_tx()).collect::<Vec<_>>();
+            let transactions_root = calculate_transaction_root(&signed_body);
             let receipts = body
                 .iter()
                 .enumerate()
@@ -1597,37 +1611,37 @@ mod tests {
             // receipts root computation is different for OP
             let receipts_root = calculate_receipt_root(&receipts);
 
-            SealedBlockWithSenders::new(
-                SealedBlock {
-                    header: Header {
-                        number,
-                        parent_hash: parent.unwrap_or_default(),
-                        gas_used: body.len() as u64 * MIN_TRANSACTION_GAS,
-                        gas_limit: chain_spec.max_gas_limit,
-                        mix_hash: B256::random(),
-                        base_fee_per_gas: Some(EIP1559_INITIAL_BASE_FEE),
-                        transactions_root,
-                        receipts_root,
-                        state_root: state_root_unhashed(HashMap::from([(
-                            signer,
-                            (
-                                AccountInfo {
-                                    balance: initial_signer_balance -
-                                        (single_tx_cost * U256::from(num_of_signer_txs)),
-                                    nonce: num_of_signer_txs,
-                                    ..Default::default()
-                                },
-                                EMPTY_ROOT_HASH,
-                            ),
-                        )])),
+            let header = Header {
+                number,
+                parent_hash: parent.unwrap_or_default(),
+                gas_used: body.len() as u64 * MIN_TRANSACTION_GAS,
+                gas_limit: ETHEREUM_BLOCK_GAS_LIMIT,
+                mix_hash: B256::random(),
+                base_fee_per_gas: Some(INITIAL_BASE_FEE),
+                transactions_root,
+                receipts_root,
+                state_root: state_root_unhashed(HashMap::from([(
+                    signer,
+                    Account {
+                        balance: initial_signer_balance -
+                            (single_tx_cost * U256::from(num_of_signer_txs)),
+                        nonce: num_of_signer_txs,
                         ..Default::default()
                     }
-                    .seal_slow(),
-                    body: body.clone().into_iter().map(|tx| tx.into_signed()).collect(),
-                    ommers: Vec::new(),
-                    withdrawals: Some(Withdrawals::default()),
-                    requests: None,
-                },
+                    .into_trie_account(EMPTY_ROOT_HASH),
+                )])),
+                ..Default::default()
+            };
+
+            SealedBlockWithSenders::new(
+                SealedBlock::new(
+                    SealedHeader::seal(header),
+                    BlockBody {
+                        transactions: signed_body,
+                        ommers: Vec::new(),
+                        withdrawals: Some(Withdrawals::default()),
+                    },
+                ),
                 body.iter().map(|tx| tx.signer()).collect(),
             )
             .unwrap()
@@ -1866,7 +1880,12 @@ mod tests {
         );
 
         let provider = tree.externals.provider_factory.provider().unwrap();
-        let prefix_sets = exec5.hash_state_slow().construct_prefix_sets().freeze();
+        let prefix_sets = tree
+            .externals
+            .provider_factory
+            .hashed_post_state(exec5.state())
+            .construct_prefix_sets()
+            .freeze();
         let state_root =
             StateRoot::from_tx(provider.tx_ref()).with_prefix_sets(prefix_sets).root().unwrap();
         assert_eq!(state_root, block5.state_root);
@@ -2172,7 +2191,7 @@ mod tests {
                 (block1.parent_hash, HashSet::from([block1a_hash])),
                 (block1.hash(), HashSet::from([block2.hash()])),
             ]))
-            .with_pending_blocks((block2.number + 1, HashSet::new()))
+            .with_pending_blocks((block2.number + 1, HashSet::default()))
             .assert(&tree);
 
         assert_matches!(tree.make_canonical(block1a_hash), Ok(_));
@@ -2196,7 +2215,7 @@ mod tests {
                 (block1.parent_hash, HashSet::from([block1.hash()])),
                 (block1.hash(), HashSet::from([block2.hash()])),
             ]))
-            .with_pending_blocks((block1a.number + 1, HashSet::new()))
+            .with_pending_blocks((block1a.number + 1, HashSet::default()))
             .assert(&tree);
 
         // check notification.
@@ -2233,7 +2252,7 @@ mod tests {
                 (block1.parent_hash, HashSet::from([block1a_hash])),
                 (block1.hash(), HashSet::from([block2a_hash])),
             ]))
-            .with_pending_blocks((block2.number + 1, HashSet::new()))
+            .with_pending_blocks((block2.number + 1, HashSet::default()))
             .assert(&tree);
 
         // check notification.
@@ -2302,7 +2321,7 @@ mod tests {
             .with_chain_num(1)
             .with_block_to_chain(HashMap::from([(block2a_hash, 4.into())]))
             .with_fork_to_child(HashMap::from([(block1.hash(), HashSet::from([block2a_hash]))]))
-            .with_pending_blocks((block2.number + 1, HashSet::new()))
+            .with_pending_blocks((block2.number + 1, HashSet::default()))
             .assert(&tree);
 
         // check notification.

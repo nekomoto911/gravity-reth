@@ -1,35 +1,43 @@
-use std::{fmt, io, marker::PhantomData};
+use std::{fmt, io};
 
 use futures::Future;
 use reth_primitives::{Receipt, Receipts};
 use tokio::io::AsyncReadExt;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{Decoder, FramedRead};
-use tracing::trace;
+use tracing::{trace, warn};
 
 use crate::{DecodedFileChunk, FileClientError};
+
+/// Helper trait implemented for [`Decoder`] that decodes the receipt type.
+pub trait ReceiptDecoder: Decoder<Item = Option<ReceiptWithBlockNumber<Self::Receipt>>> {
+    /// The receipt type being decoded.
+    type Receipt;
+}
+
+impl<T, R> ReceiptDecoder for T
+where
+    T: Decoder<Item = Option<ReceiptWithBlockNumber<R>>>,
+{
+    type Receipt = R;
+}
 
 /// File client for reading RLP encoded receipts from file. Receipts in file must be in sequential
 /// order w.r.t. block number.
 #[derive(Debug)]
-pub struct ReceiptFileClient<D> {
+pub struct ReceiptFileClient<D: ReceiptDecoder> {
     /// The buffered receipts, read from file, as nested lists. One list per block number.
-    pub receipts: Receipts,
+    pub receipts: Receipts<D::Receipt>,
     /// First (lowest) block number read from file.
     pub first_block: u64,
     /// Total number of receipts. Count of elements in [`Receipts`] flattened.
     pub total_receipts: usize,
-    /// marker
-    _marker: PhantomData<D>,
 }
 
 /// Constructs a file client from a reader and decoder.
-pub trait FromReceiptReader<D> {
+pub trait FromReceiptReader {
     /// Error returned by file client type.
     type Error: From<io::Error>;
-
-    /// Returns a decoder instance
-    fn decoder() -> D;
 
     /// Returns a file client
     fn from_receipt_reader<B>(
@@ -42,17 +50,11 @@ pub trait FromReceiptReader<D> {
         B: AsyncReadExt + Unpin;
 }
 
-impl<D> FromReceiptReader<D> for ReceiptFileClient<D>
+impl<D> FromReceiptReader for ReceiptFileClient<D>
 where
-    D: Decoder<Item = Option<ReceiptWithBlockNumber>, Error = FileClientError>
-        + fmt::Debug
-        + Default,
+    D: ReceiptDecoder<Error = FileClientError> + fmt::Debug + Default,
 {
     type Error = D::Error;
-
-    fn decoder() -> D {
-        D::default()
-    }
 
     /// Initialize the [`ReceiptFileClient`] from bytes that have been read from file. Caution! If
     /// first block has no transactions, it's assumed to be the genesis block.
@@ -67,12 +69,12 @@ where
         let mut receipts = Receipts::default();
 
         // use with_capacity to make sure the internal buffer contains the entire chunk
-        let mut stream = FramedRead::with_capacity(reader, Self::decoder(), num_bytes as usize);
+        let mut stream = FramedRead::with_capacity(reader, D::default(), num_bytes as usize);
 
         trace!(target: "downloaders::file",
             target_num_bytes=num_bytes,
             capacity=stream.read_buffer().capacity(),
-            codec=?Self::decoder(),
+            codec=?D::default(),
             "init decode stream"
         );
 
@@ -106,6 +108,11 @@ where
 
                 match receipt {
                     Some(ReceiptWithBlockNumber { receipt, number }) => {
+                        if block_number > number {
+                            warn!(target: "downloaders::file", previous_block_number = block_number, "skipping receipt from a lower block: {number}");
+                            continue
+                        }
+
                         total_receipts += 1;
 
                         if first_block.is_none() {
@@ -188,7 +195,6 @@ where
                     receipts,
                     first_block: first_block.unwrap_or_default(),
                     total_receipts,
-                    _marker: Default::default(),
                 },
                 remaining_bytes,
                 highest_block: Some(block_number),
@@ -199,18 +205,21 @@ where
 
 /// [`Receipt`] with block number.
 #[derive(Debug, PartialEq, Eq)]
-pub struct ReceiptWithBlockNumber {
+pub struct ReceiptWithBlockNumber<R = Receipt> {
     /// Receipt.
-    pub receipt: Receipt,
+    pub receipt: R,
     /// Block number.
     pub number: u64,
 }
 
 #[cfg(test)]
 mod test {
-    use alloy_primitives::{hex, Address, Bytes, Log, LogData, B256};
+    use alloy_primitives::{
+        bytes::{Buf, BytesMut},
+        hex, Address, Bytes, Log, LogData, B256,
+    };
     use alloy_rlp::{Decodable, RlpDecodable};
-    use reth_primitives::{Buf, BytesMut, Receipt, TxType};
+    use reth_primitives::{Receipt, TxType};
     use reth_tracing::init_test_tracing;
     use tokio_util::codec::Decoder;
 

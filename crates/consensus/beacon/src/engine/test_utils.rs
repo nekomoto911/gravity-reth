@@ -1,23 +1,34 @@
 #![allow(missing_docs)]
-
+use crate::{
+    engine::hooks::PruneHook, hooks::EngineHooks, BeaconConsensusEngine,
+    BeaconConsensusEngineError, BeaconConsensusEngineHandle, BeaconForkChoiceUpdateError,
+    EthBeaconConsensus, MIN_BLOCKS_FOR_PIPELINE_RUN,
+};
 use alloy_primitives::{BlockNumber, B256};
+use alloy_rpc_types_engine::{
+    ExecutionPayload, ExecutionPayloadSidecar, ForkchoiceState, ForkchoiceUpdated, PayloadStatus,
+};
 use reth_blockchain_tree::{
     config::BlockchainTreeConfig, externals::TreeExternals, BlockchainTree, ShareableBlockchainTree,
 };
 use reth_chainspec::ChainSpec;
 use reth_config::config::StageConfig;
-use reth_consensus::{test_utils::TestConsensus, Consensus};
+use reth_consensus::{test_utils::TestConsensus, FullConsensus};
 use reth_db::{test_utils::TempDatabase, DatabaseEnv as DE};
 use reth_downloaders::{
     bodies::bodies::BodiesDownloaderBuilder,
     headers::reverse_headers::ReverseHeadersDownloaderBuilder,
 };
+use reth_engine_primitives::{BeaconOnNewPayloadError, EngineApiMessageVersion};
 use reth_ethereum_engine_primitives::EthEngineTypes;
 use reth_evm::{either::Either, test_utils::MockExecutorProvider};
 use reth_evm_ethereum::execute::EthExecutorProvider;
 use reth_exex_types::FinishedExExHeight;
-use reth_network_p2p::{sync::NoopSyncStateUpdater, test_utils::NoopFullBlockClient, BlockClient};
+use reth_network_p2p::{
+    sync::NoopSyncStateUpdater, test_utils::NoopFullBlockClient, EthBlockClient,
+};
 use reth_payload_builder::test_utils::spawn_test_payload_service;
+use reth_primitives::SealedHeader;
 use reth_provider::{
     providers::BlockchainProvider,
     test_utils::{create_test_provider_factory_with_chain_spec, MockNodeTypesWithDB},
@@ -25,20 +36,11 @@ use reth_provider::{
 };
 use reth_prune::Pruner;
 use reth_prune_types::PruneModes;
-use reth_rpc_types::engine::{
-    CancunPayloadFields, ExecutionPayload, ForkchoiceState, ForkchoiceUpdated, PayloadStatus,
-};
 use reth_stages::{sets::DefaultStages, test_utils::TestStages, ExecOutput, Pipeline, StageError};
 use reth_static_file::StaticFileProducer;
 use reth_tasks::TokioTaskExecutor;
 use std::{collections::VecDeque, sync::Arc};
 use tokio::sync::{oneshot, watch};
-
-use crate::{
-    engine::hooks::PruneHook, hooks::EngineHooks, BeaconConsensusEngine,
-    BeaconConsensusEngineError, BeaconConsensusEngineHandle, BeaconForkChoiceUpdateError,
-    BeaconOnNewPayloadError, EthBeaconConsensus, MIN_BLOCKS_FOR_PIPELINE_RUN,
-};
 
 type DatabaseEnv = TempDatabase<DE>;
 
@@ -69,9 +71,9 @@ impl<DB> TestEnv<DB> {
     pub async fn send_new_payload<T: Into<ExecutionPayload>>(
         &self,
         payload: T,
-        cancun_fields: Option<CancunPayloadFields>,
+        sidecar: ExecutionPayloadSidecar,
     ) -> Result<PayloadStatus, BeaconOnNewPayloadError> {
-        self.engine_handle.new_payload(payload.into(), cancun_fields).await
+        self.engine_handle.new_payload(payload.into(), sidecar).await
     }
 
     /// Sends the `ExecutionPayload` message to the consensus engine and retries if the engine
@@ -79,11 +81,11 @@ impl<DB> TestEnv<DB> {
     pub async fn send_new_payload_retry_on_syncing<T: Into<ExecutionPayload>>(
         &self,
         payload: T,
-        cancun_fields: Option<CancunPayloadFields>,
+        sidecar: ExecutionPayloadSidecar,
     ) -> Result<PayloadStatus, BeaconOnNewPayloadError> {
         let payload: ExecutionPayload = payload.into();
         loop {
-            let result = self.send_new_payload(payload.clone(), cancun_fields.clone()).await?;
+            let result = self.send_new_payload(payload.clone(), sidecar.clone()).await?;
             if !result.is_syncing() {
                 return Ok(result)
             }
@@ -94,7 +96,9 @@ impl<DB> TestEnv<DB> {
         &self,
         state: ForkchoiceState,
     ) -> Result<ForkchoiceUpdated, BeaconForkChoiceUpdateError> {
-        self.engine_handle.fork_choice_updated(state, None).await
+        self.engine_handle
+            .fork_choice_updated(state, None, EngineApiMessageVersion::default())
+            .await
     }
 
     /// Sends the `ForkchoiceUpdated` message to the consensus engine and retries if the engine
@@ -104,7 +108,10 @@ impl<DB> TestEnv<DB> {
         state: ForkchoiceState,
     ) -> Result<ForkchoiceUpdated, BeaconForkChoiceUpdateError> {
         loop {
-            let result = self.engine_handle.fork_choice_updated(state, None).await?;
+            let result = self
+                .engine_handle
+                .fork_choice_updated(state, None, EngineApiMessageVersion::default())
+                .await?;
             if !result.is_syncing() {
                 return Ok(result)
             }
@@ -232,7 +239,7 @@ impl TestConsensusEngineBuilder {
         client: Client,
     ) -> NetworkedTestConsensusEngineBuilder<Client>
     where
-        Client: BlockClient + 'static,
+        Client: EthBlockClient + 'static,
     {
         NetworkedTestConsensusEngineBuilder { base_config: self, client: Some(client) }
     }
@@ -259,7 +266,7 @@ pub struct NetworkedTestConsensusEngineBuilder<Client> {
 
 impl<Client> NetworkedTestConsensusEngineBuilder<Client>
 where
-    Client: BlockClient + 'static,
+    Client: EthBlockClient + 'static,
 {
     /// Set the pipeline execution outputs to use for the test consensus engine.
     #[allow(dead_code)]
@@ -314,7 +321,7 @@ where
         client: ClientType,
     ) -> NetworkedTestConsensusEngineBuilder<ClientType>
     where
-        ClientType: BlockClient + 'static,
+        ClientType: EthBlockClient + 'static,
     {
         NetworkedTestConsensusEngineBuilder { base_config: self.base_config, client: Some(client) }
     }
@@ -325,7 +332,7 @@ where
         let provider_factory =
             create_test_provider_factory_with_chain_spec(self.base_config.chain_spec.clone());
 
-        let consensus: Arc<dyn Consensus> = match self.base_config.consensus {
+        let consensus: Arc<dyn FullConsensus> = match self.base_config.consensus {
             TestConsensusConfig::Real => {
                 Arc::new(EthBeaconConsensus::new(Arc::clone(&self.base_config.chain_spec)))
             }
@@ -363,17 +370,21 @@ where
                 .with_tip_sender(tip_tx),
             TestPipelineConfig::Real => {
                 let header_downloader = ReverseHeadersDownloaderBuilder::default()
-                    .build(client.clone(), consensus.clone())
+                    .build(client.clone(), consensus.clone().as_header_validator())
                     .into_task();
 
                 let body_downloader = BodiesDownloaderBuilder::default()
-                    .build(client.clone(), consensus.clone(), provider_factory.clone())
+                    .build(
+                        client.clone(),
+                        consensus.clone().as_consensus(),
+                        provider_factory.clone(),
+                    )
                     .into_task();
 
                 Pipeline::<MockNodeTypesWithDB>::builder().add_stages(DefaultStages::new(
                     provider_factory.clone(),
                     tip_rx.clone(),
-                    Arc::clone(&consensus),
+                    consensus.clone().as_consensus(),
                     header_downloader,
                     body_downloader,
                     executor_factory.clone(),
@@ -395,10 +406,16 @@ where
             BlockchainTree::new(externals, BlockchainTreeConfig::new(1, 2, 3, 2))
                 .expect("failed to create tree"),
         ));
-        let genesis_block = self.base_config.chain_spec.genesis_header().clone().seal_slow();
+        let header = self.base_config.chain_spec.genesis_header().clone();
+        let genesis_block = SealedHeader::seal(header);
 
-        let blockchain_provider =
-            BlockchainProvider::with_blocks(provider_factory.clone(), tree, genesis_block, None);
+        let blockchain_provider = BlockchainProvider::with_blocks(
+            provider_factory.clone(),
+            tree,
+            genesis_block,
+            None,
+            None,
+        );
 
         let pruner = Pruner::new_with_factory(
             provider_factory.clone(),
@@ -438,7 +455,7 @@ pub fn spawn_consensus_engine<Client>(
     engine: TestBeaconConsensusEngine<Client>,
 ) -> oneshot::Receiver<Result<(), BeaconConsensusEngineError>>
 where
-    Client: BlockClient + 'static,
+    Client: EthBlockClient + 'static,
 {
     let (tx, rx) = oneshot::channel();
     tokio::spawn(async move {
