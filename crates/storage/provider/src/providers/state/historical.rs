@@ -27,7 +27,7 @@ use reth_trie_db::{
     DatabaseHashedPostState, DatabaseHashedStorage, DatabaseProof, DatabaseStateRoot,
     DatabaseStorageProof, DatabaseStorageRoot, DatabaseTrieWitness, StateCommitment,
 };
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 /// State provider for a given block number which takes a tx reference.
 ///
@@ -323,8 +323,8 @@ impl<Provider: DBProvider + BlockNumReader + StateCommitmentProvider> StateRootP
         &self,
         state: HashedPostState,
         hashed_state_vec: Vec<Arc<HashedPostState>>,
-        trie_updates_vec:Vec<Arc<TrieUpdates>>,
-    ) -> ProviderResult<(B256,TrieUpdates)>  {
+        trie_updates_vec: Vec<Arc<TrieUpdates>>,
+    ) -> ProviderResult<(B256, TrieUpdates)> {
         todo!()
     }
 }

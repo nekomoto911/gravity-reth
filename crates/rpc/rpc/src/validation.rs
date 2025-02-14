@@ -16,7 +16,11 @@ use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_consensus::{Consensus, FullConsensus, PostExecutionInput};
 use reth_engine_primitives::{ExecutionData, PayloadValidator};
 use reth_errors::{BlockExecutionError, ConsensusError, ProviderError};
-use reth_evm::execute::{BlockExecutorProvider, Executor};
+use reth_evm::{
+    database::*,
+    execute::{BlockExecutorProvider, Executor},
+    serial_database,
+};
 use reth_metrics::{metrics, metrics::Gauge, Metrics};
 use reth_primitives::{GotExpected, NodePrimitives, RecoveredBlock};
 use reth_primitives_traits::{
@@ -164,16 +168,16 @@ where
         let mut request_cache = self.cached_reads(parent_header_hash).await;
 
         let cached_db = request_cache.as_db_mut(StateProviderDatabase::new(&state_provider));
-        let executor = self.executor_provider.executor(cached_db);
+        let executor = self.executor_provider.executor(serial_database! { cached_db });
 
         let mut accessed_blacklisted = None;
         let output = executor.execute_with_state_closure(&block, |state| {
             if !self.disallow.is_empty() {
-                for account in state.cache.accounts.keys() {
-                    if self.disallow.contains(account) {
-                        accessed_blacklisted = Some(*account);
+                state.for_each_accounts(&mut |(address, _)| {
+                    if self.disallow.contains(address) {
+                        accessed_blacklisted = Some(*address);
                     }
-                }
+                });
             }
         })?;
 

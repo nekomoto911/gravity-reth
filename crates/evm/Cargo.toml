@@ -26,6 +26,8 @@ reth-storage-errors.workspace = true
 revm.workspace = true
 revm-primitives.workspace = true
 
+reth-grevm.workspace = true
+
 # alloy
 alloy-primitives.workspace = true
 alloy-eips.workspace = true

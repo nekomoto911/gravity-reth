@@ -39,6 +39,8 @@ use reth_ethereum_forks::EthereumHardfork;
 pub mod execute;
 pub mod parallel_execute;
 
+// TODO(nekomoto): mod debug_ext;
+
 /// Ethereum DAO hardfork state change data.
 pub mod dao_fork;
 

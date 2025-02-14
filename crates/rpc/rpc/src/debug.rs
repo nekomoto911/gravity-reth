@@ -17,9 +17,10 @@ use async_trait::async_trait;
 use jsonrpsee::core::RpcResult;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_evm::{
+    database::*,
     env::EvmEnv,
     execute::{BlockExecutorProvider, Executor},
-    ConfigureEvmEnv, TransactionEnv,
+    parallel_database, ConfigureEvmEnv, TransactionEnv,
 };
 use reth_primitives::{NodePrimitives, ReceiptWithBloom, RecoveredBlock};
 use reth_primitives_traits::{Block as _, BlockBody, SignedTransaction};
@@ -640,14 +641,18 @@ where
         self.eth_api()
             .spawn_with_state_at_block(block.parent_hash().into(), move |state_provider| {
                 let db = StateProviderDatabase::new(&state_provider);
-                let block_executor = this.inner.block_executor.executor(db);
+                let block_executor = this.inner.block_executor.executor(parallel_database! { db });
 
                 let mut witness_record = ExecutionWitnessRecord::default();
 
                 let _ = block_executor
-                    .execute_with_state_closure(&(*block).clone(), |statedb: &State<_>| {
-                        witness_record.record_executed_state(statedb);
-                    })
+                    .execute_with_state_closure(
+                        &(*block).clone(),
+                        |statedb: &dyn reth_evm::State| {
+                            // TODO(nekomoto911): witness_record.record_executed_state(statedb);
+                            todo!()
+                        },
+                    )
                     .map_err(|err| EthApiError::Internal(err.into()))?;
 
                 let ExecutionWitnessRecord { hashed_state, codes, keys } = witness_record;

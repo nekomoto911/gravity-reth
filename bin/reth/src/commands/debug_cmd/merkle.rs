@@ -14,7 +14,11 @@ use reth_consensus::{Consensus, ConsensusError};
 use reth_db::tables;
 use reth_db_api::{cursor::DbCursorRO, transaction::DbTx};
 use reth_ethereum_primitives::EthPrimitives;
-use reth_evm::execute::{BlockExecutorProvider, Executor};
+use reth_evm::{
+    database::*,
+    execute::{BlockExecutorProvider, Executor},
+    parallel_database,
+};
 use reth_network::{BlockDownloaderProvider, NetworkHandle};
 use reth_network_api::NetworkInfo;
 use reth_network_p2p::full_block::FullBlockClient;
@@ -161,8 +165,9 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
             provider_rw.insert_block(sealed_block.clone(), StorageLocation::Database)?;
 
             td += sealed_block.difficulty();
-            let executor = executor_provider
-                .executor(StateProviderDatabase::new(LatestStateProviderRef::new(&provider_rw)));
+            let executor = executor_provider.executor(parallel_database!(
+                StateProviderDatabase::new(LatestStateProviderRef::new(&provider_rw))
+            ));
             let output = executor.execute(&sealed_block)?;
 
             provider_rw.write_state(

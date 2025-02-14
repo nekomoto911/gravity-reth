@@ -7,7 +7,7 @@ use reth_primitives::{NodePrimitives, RecoveredBlock};
 use crate::{
     execute::{BlockExecutorProvider, Executor},
     system_calls::OnStateHook,
-    Database,
+    Database, DatabaseEnum, ParallelDatabase, State,
 };
 
 const UNAVAILABLE_FOR_NOOP: &str = "execution unavailable for noop";
@@ -20,19 +20,18 @@ pub struct NoopBlockExecutorProvider<P>(core::marker::PhantomData<P>);
 impl<P: NodePrimitives> BlockExecutorProvider for NoopBlockExecutorProvider<P> {
     type Primitives = P;
 
-    type Executor<DB: Database> = Self;
+    type Executor<'db> = Self;
 
-    type ParallelProvider<'a> = Self;
-
-    fn executor<DB>(&self, _: DB) -> Self::Executor<DB>
+    fn executor<'db, DB, PDB>(&self, _: DatabaseEnum<DB, PDB>) -> Self::Executor<'db>
     where
         DB: Database,
+        PDB: ParallelDatabase,
     {
         Self::default()
     }
 }
 
-impl<DB: Database, P: NodePrimitives> Executor<DB> for NoopBlockExecutorProvider<P> {
+impl<'db, P: NodePrimitives> Executor<'db> for NoopBlockExecutorProvider<P> {
     type Primitives = P;
     type Error = BlockExecutionError;
 
@@ -55,7 +54,7 @@ impl<DB: Database, P: NodePrimitives> Executor<DB> for NoopBlockExecutorProvider
         Err(BlockExecutionError::msg(UNAVAILABLE_FOR_NOOP))
     }
 
-    fn into_state(self) -> revm::db::State<DB> {
+    fn into_state(self) -> Box<dyn State + 'db> {
         unreachable!()
     }
 

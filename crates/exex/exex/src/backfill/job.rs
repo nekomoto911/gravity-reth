@@ -6,8 +6,10 @@ use std::{
 
 use alloy_consensus::BlockHeader;
 use alloy_primitives::BlockNumber;
-use reth_evm::execute::{
-    BlockExecutionError, BlockExecutionOutput, BlockExecutorProvider, Executor,
+use reth_evm::{
+    database::*,
+    execute::{BlockExecutionError, BlockExecutionOutput, BlockExecutorProvider, Executor},
+    parallel_database,
 };
 use reth_node_api::{Block as _, BlockBody as _, NodePrimitives};
 use reth_primitives::{Receipt, RecoveredBlock};
@@ -76,9 +78,10 @@ where
             "Executing block range"
         );
 
-        let mut executor = self.executor.executor(StateProviderDatabase::new(
-            self.provider.history_by_block_number(self.range.start().saturating_sub(1))?,
-        ));
+        let mut executor = self.executor.executor(parallel_database! { StateProviderDatabase::new(
+                self.provider.history_by_block_number(self.range.start().saturating_sub(1))?,
+            )
+        });
 
         let mut fetch_block_duration = Duration::default();
         let mut execution_duration = Duration::default();
@@ -210,9 +213,9 @@ where
             .ok_or_else(|| ProviderError::HeaderNotFound(block_number.into()))?;
 
         // Configure the executor to use the previous block's state.
-        let executor = self.executor.executor(StateProviderDatabase::new(
+        let executor = self.executor.executor(parallel_database! { StateProviderDatabase::new(
             self.provider.history_by_block_number(block_number.saturating_sub(1))?,
-        ));
+        )});
 
         trace!(target: "exex::backfill", number = block_number, txs = block_with_senders.body().transaction_count(), "Executing block");
 

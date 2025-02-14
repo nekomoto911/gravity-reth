@@ -47,6 +47,12 @@ pub mod system_calls;
 /// test helpers for mocking executor
 pub mod test_utils;
 
+pub mod database;
+pub use database::{Database, DatabaseEnum, ParallelDatabase};
+
+mod state;
+pub use state::State;
+
 /// An abstraction over EVM.
 ///
 /// At this point, assumed to be implemented on wrappers around [`revm::Evm`].
@@ -92,8 +98,20 @@ pub trait Evm {
     }
 }
 /// Helper trait to bound [`revm::Database::Error`] with common requirements.
-pub trait Database: revm::Database<Error: core::error::Error + Send + Sync + 'static> {}
-impl<T> Database for T where T: revm::Database<Error: core::error::Error + Send + Sync + 'static> {}
+
+#[macro_export]
+macro_rules! parallel_database {
+    ($db:expr) => {
+        DatabaseEnum::<NoopDatabase, _>::Parallel($db)
+    };
+}
+
+#[macro_export]
+macro_rules! serial_database {
+    ($db:expr) => {
+        DatabaseEnum::<_, NoopDatabase>::Serial($db)
+    };
+}
 
 /// Trait for configuring the EVM for executing full blocks.
 pub trait ConfigureEvm: ConfigureEvmEnv {

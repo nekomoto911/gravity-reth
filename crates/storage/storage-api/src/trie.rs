@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use alloy_primitives::{map::B256Map, Address, Bytes, B256};
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie::{

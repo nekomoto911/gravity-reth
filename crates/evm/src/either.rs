@@ -3,7 +3,7 @@
 use crate::{
     execute::{BlockExecutorProvider, Executor},
     system_calls::OnStateHook,
-    Database,
+    Database, DatabaseEnum, ParallelDatabase, State,
 };
 
 // re-export Either
@@ -18,13 +18,12 @@ where
 {
     type Primitives = A::Primitives;
 
-    type Executor<DB: Database> = Either<A::Executor<DB>, B::Executor<DB>>;
+    type Executor<'db> = Either<A::Executor<'db>, B::Executor<'db>>;
 
-    type ParallelProvider<'a> = NoopBlockExecutorProvider;
-
-    fn executor<DB>(&self, db: DB) -> Self::Executor<DB>
+    fn executor<'db, DB, PDB>(&self, db: DatabaseEnum<DB, PDB>) -> Self::Executor<'db>
     where
-        DB: Database,
+        DB: Database + 'db,
+        PDB: ParallelDatabase + 'db,
     {
         match self {
             Self::Left(a) => Either::Left(a.executor(db)),
@@ -33,11 +32,10 @@ where
     }
 }
 
-impl<A, B, DB> Executor<DB> for Either<A, B>
+impl<'db, A, B> Executor<'db> for Either<A, B>
 where
-    A: Executor<DB>,
-    B: Executor<DB, Primitives = A::Primitives, Error = A::Error>,
-    DB: Database,
+    A: Executor<'db>,
+    B: Executor<'db, Primitives = A::Primitives, Error = A::Error>,
 {
     type Primitives = A::Primitives;
     type Error = A::Error;
@@ -84,7 +82,7 @@ where
         state: F,
     ) -> Result<BlockExecutionOutput<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
     where
-        F: FnMut(&revm::db::State<DB>),
+        F: FnMut(&dyn State),
     {
         match self {
             Self::Left(a) => a.execute_with_state_closure(block, state),
@@ -92,7 +90,7 @@ where
         }
     }
 
-    fn into_state(self) -> revm::db::State<DB> {
+    fn into_state(self) -> Box<dyn State + 'db> {
         match self {
             Self::Left(a) => a.into_state(),
             Self::Right(b) => b.into_state(),

@@ -14,7 +14,7 @@ use reth_trie::{
     MultiProofTargets, StorageMultiProof, TrieInput,
 };
 use revm::db::BundleState;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 /// A state provider that stores references to in-memory blocks along with their state as well as a
 /// reference of the historical state provider for fallback lookups.

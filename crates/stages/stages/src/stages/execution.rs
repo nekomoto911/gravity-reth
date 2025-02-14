@@ -7,8 +7,10 @@ use reth_config::config::ExecutionConfig;
 use reth_consensus::{ConsensusError, FullConsensus, PostExecutionInput};
 use reth_db::{static_file::HeaderMask, tables};
 use reth_evm::{
+    database::*,
     execute::{BlockExecutorProvider, Executor},
     metrics::ExecutorMetrics,
+    parallel_database,
 };
 use reth_execution_types::Chain;
 use reth_exex::{ExExManagerHandle, ExExNotification, ExExNotificationSource};
@@ -18,7 +20,8 @@ use reth_provider::{
     providers::{StaticFileProvider, StaticFileWriter},
     BlockHashReader, BlockReader, DBProvider, ExecutionOutcome, HeaderProvider,
     LatestStateProviderRef, OriginalValuesKnown, ProviderError, StateCommitmentProvider,
-    StateWriter, StaticFileProviderFactory, StatsReader, StorageLocation, TransactionVariant,
+    StateProvider, StateWriter, StaticFileProviderFactory, StatsReader, StorageLocation,
+    TransactionVariant, STATE_PROVIDER_OPTS,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::{
@@ -301,9 +304,10 @@ where
 
         // NOTE: We can ignore the error here, since an error means that the channel is closed,
         // which means the manager has died, which then in turn means the node is shutting down.
-        let _ = self
-            .exex_manager_handle
-            .send(ExExNotification::ChainCommitted { new: Arc::new(chain) });
+        let _ = self.exex_manager_handle.send(
+            ExExNotificationSource::Pipeline,
+            ExExNotification::ChainCommitted { new: Arc::new(chain) },
+        );
 
         Ok(())
     }
@@ -322,10 +326,13 @@ where
             })
         }
 
+        self.ensure_consistency(provider, input.checkpoint.block_number, Some(unwind_to))?;
+
         // Unwind account and storage changesets, as well as receipts.
         //
         // This also updates `PlainStorageState` and `PlainAccountState`.
-        let bundle_state_with_receipts = provider.take_state(range.clone())?;
+        let bundle_state_with_receipts =
+            provider.take_state_above(unwind_to, StorageLocation::Both)?;
 
         // Prepare the input for post unwind commit hook, where an `ExExNotification` will be sent.
         if self.exex_manager_handle.has_exexs() {
@@ -346,25 +353,6 @@ where
             }
         }
 
-        let static_file_provider = provider.static_file_provider();
-
-        // Unwind all receipts for transactions in the block range
-        if self.prune_modes.receipts.is_none() && self.prune_modes.receipts_log_filter.is_empty() {
-            // We only use static files for Receipts, if there is no receipt pruning of any kind.
-
-            // prepare_static_file_producer does a consistency check that will unwind static files
-            // if the expected highest receipt in the files is higher than the database.
-            // Which is essentially what happens here when we unwind this stage.
-            let _static_file_producer =
-                prepare_static_file_producer(provider, &static_file_provider, *range.start())?;
-        } else {
-            // If there is any kind of receipt pruning/filtering we use the database, since static
-            // files do not support filters.
-            //
-            // If we hit this case, the receipts have already been unwound by the call to
-            // `take_state`.
-        }
-
         // Update the checkpoint.
         let mut stage_checkpoint = input.checkpoint.execution_stage_checkpoint();
         if let Some(stage_checkpoint) = stage_checkpoint.as_mut() {
@@ -372,7 +360,8 @@ where
                 stage_checkpoint.progress.processed -= provider
                     .block_by_number(block_number)?
                     .ok_or_else(|| ProviderError::HeaderNotFound(block_number.into()))?
-                    .gas_used;
+                    .header()
+                    .gas_used();
             }
         }
         let checkpoint = if let Some(stage_checkpoint) = stage_checkpoint {
@@ -389,8 +378,10 @@ where
 
         // NOTE: We can ignore the error here, since an error means that the channel is closed,
         // which means the manager has died, which then in turn means the node is shutting down.
-        let _ =
-            self.exex_manager_handle.send(ExExNotification::ChainReverted { old: Arc::new(chain) });
+        let _ = self.exex_manager_handle.send(
+            ExExNotificationSource::Pipeline,
+            ExExNotification::ChainReverted { old: Arc::new(chain) },
+        );
 
         Ok(())
     }
@@ -407,9 +398,15 @@ where
         input: ExecInput,
     ) -> Result<ExecOutput, StageError>
     where
-        Provider:
-            DBProvider + BlockReader + StaticFileProviderFactory + StatsReader + StateChangeWriter,
-        for<'a> UnifiedStorageWriter<'a, Provider, StaticFileProviderRWRefMut<'a>>: StateWriter,
+        Provider: DBProvider
+            + BlockReader<
+                Block = <E::Primitives as NodePrimitives>::Block,
+                Header = <E::Primitives as NodePrimitives>::BlockHeader,
+            > + StaticFileProviderFactory
+            + StatsReader
+            + BlockHashReader
+            + StateWriter<Receipt = <E::Primitives as NodePrimitives>::Receipt>
+            + StateCommitmentProvider,
     {
         if input.target_reached() {
             return Ok(ExecOutput::done(input.checkpoint()))
@@ -421,8 +418,13 @@ where
 
         self.ensure_consistency(provider, input.checkpoint().block_number, None)?;
 
-        let db = StateProviderDatabase(LatestStateProviderRef::new(provider));
-        let mut executor = self.executor_provider.executor(db);
+        let db: Box<dyn StateProvider> = if let Some(factory) = factory {
+            Box::new(factory.latest(STATE_PROVIDER_OPTS.clone())?)
+        } else {
+            Box::new(LatestStateProviderRef::new(provider))
+        };
+        let mut executor =
+            self.executor_provider.executor(parallel_database! { StateProviderDatabase(db) });
 
         // Progress tracking
         let mut stage_progress = start_block;
@@ -614,93 +616,6 @@ where
                 .with_execution_stage_checkpoint(stage_checkpoint),
             done,
         })
-    }
-
-    fn post_execute_commit(&mut self) -> Result<(), StageError> {
-        let Some(chain) = self.post_execute_commit_input.take() else { return Ok(()) };
-
-        // NOTE: We can ignore the error here, since an error means that the channel is closed,
-        // which means the manager has died, which then in turn means the node is shutting down.
-        let _ = self.exex_manager_handle.send(
-            ExExNotificationSource::Pipeline,
-            ExExNotification::ChainCommitted { new: Arc::new(chain) },
-        );
-
-        Ok(())
-    }
-
-    /// Unwind the stage.
-    fn unwind(
-        &mut self,
-        provider: &Provider,
-        input: UnwindInput,
-    ) -> Result<UnwindOutput, StageError> {
-        let (range, unwind_to, _) =
-            input.unwind_block_range_with_threshold(self.thresholds.max_blocks.unwrap_or(u64::MAX));
-        if range.is_empty() {
-            return Ok(UnwindOutput {
-                checkpoint: input.checkpoint.with_block_number(input.unwind_to),
-            })
-        }
-
-        self.ensure_consistency(provider, input.checkpoint.block_number, Some(unwind_to))?;
-
-        // Unwind account and storage changesets, as well as receipts.
-        //
-        // This also updates `PlainStorageState` and `PlainAccountState`.
-        let bundle_state_with_receipts =
-            provider.take_state_above(unwind_to, StorageLocation::Both)?;
-
-        // Prepare the input for post unwind commit hook, where an `ExExNotification` will be sent.
-        if self.exex_manager_handle.has_exexs() {
-            // Get the blocks for the unwound range.
-            let blocks = provider.sealed_block_with_senders_range(range.clone())?;
-            let previous_input = self.post_unwind_commit_input.replace(Chain::new(
-                blocks,
-                bundle_state_with_receipts,
-                None,
-            ));
-
-            debug_assert!(
-                previous_input.is_none(),
-                "Previous post unwind commit input wasn't processed"
-            );
-            if let Some(previous_input) = previous_input {
-                tracing::debug!(target: "sync::stages::execution", ?previous_input, "Previous post unwind commit input wasn't processed");
-            }
-        }
-
-        // Update the checkpoint.
-        let mut stage_checkpoint = input.checkpoint.execution_stage_checkpoint();
-        if let Some(stage_checkpoint) = stage_checkpoint.as_mut() {
-            for block_number in range {
-                stage_checkpoint.progress.processed -= provider
-                    .block_by_number(block_number)?
-                    .ok_or_else(|| ProviderError::HeaderNotFound(block_number.into()))?
-                    .header()
-                    .gas_used();
-            }
-        }
-        let checkpoint = if let Some(stage_checkpoint) = stage_checkpoint {
-            StageCheckpoint::new(unwind_to).with_execution_stage_checkpoint(stage_checkpoint)
-        } else {
-            StageCheckpoint::new(unwind_to)
-        };
-
-        Ok(UnwindOutput { checkpoint })
-    }
-
-    fn post_unwind_commit(&mut self) -> Result<(), StageError> {
-        let Some(chain) = self.post_unwind_commit_input.take() else { return Ok(()) };
-
-        // NOTE: We can ignore the error here, since an error means that the channel is closed,
-        // which means the manager has died, which then in turn means the node is shutting down.
-        let _ = self.exex_manager_handle.send(
-            ExExNotificationSource::Pipeline,
-            ExExNotification::ChainReverted { old: Arc::new(chain) },
-        );
-
-        Ok(())
     }
 }
 
