@@ -9,6 +9,7 @@ use reth_trie::{
     updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof,
     MultiProofTargets, StorageMultiProof, TrieInput,
 };
+use std::sync::Arc;
 
 /// A state provider that resolves to data from either a wrapped [`crate::ExecutionOutcome`]
 /// or an underlying state provider.
@@ -111,13 +112,13 @@ impl<SP: StateProvider, EDP: ExecutionDataProvider> StateRootProvider
         input.prepend(self.hashed_post_state(bundle_state));
         self.state_provider.state_root_from_nodes_with_updates(input)
     }
-    
+
     fn state_root_with_updates_v2(
         &self,
         state: HashedPostState,
         hashed_state_vec: Vec<Arc<HashedPostState>>,
-        trie_updates_vec:Vec<Arc<TrieUpdates>>,
-    ) -> ProviderResult<(B256,TrieUpdates)>  {
+        trie_updates_vec: Vec<Arc<TrieUpdates>>,
+    ) -> ProviderResult<(B256, TrieUpdates)> {
         todo!()
     }
 }

@@ -18,7 +18,11 @@ use reth_consensus::{Consensus, FullConsensus};
 use reth_errors::{ConsensusError, RethResult};
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
 use reth_ethereum_primitives::{EthPrimitives, Transaction, TransactionSigned};
-use reth_evm::execute::{BlockExecutorProvider, Executor};
+use reth_evm::{
+    database::*,
+    execute::{BlockExecutorProvider, Executor},
+    parallel_database,
+};
 use reth_execution_types::ExecutionOutcome;
 use reth_fs_util as fs;
 use reth_node_api::{BlockTy, EngineApiMessageVersion, PayloadBuilderAttributes};
@@ -242,8 +246,8 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
 
                 let state_provider = blockchain_db.latest()?;
                 let db = StateProviderDatabase::new(&state_provider);
-                let executor =
-                    EthExecutorProvider::ethereum(provider_factory.chain_spec()).executor(db);
+                let executor = EthExecutorProvider::ethereum(provider_factory.chain_spec())
+                    .executor(parallel_database!(db));
 
                 let block_execution_output = executor.execute(&block_with_senders)?;
                 let execution_outcome =

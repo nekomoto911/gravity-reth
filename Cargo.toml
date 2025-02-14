@@ -21,9 +21,7 @@ reth-cli.workspace = true
 reth-cli-util.workspace = true
 reth-chainspec.workspace = true
 reth-tracing.workspace = true
-reth-auto-seal-consensus.workspace = true
 reth-basic-payload-builder.workspace = true
-reth-beacon-consensus.workspace = true
 reth-ethereum-engine-primitives.workspace = true
 reth-evm-ethereum.workspace = true
 reth-network.workspace = true
@@ -32,12 +30,11 @@ reth-payload-builder.workspace = true
 reth-rpc.workspace = true
 reth-rpc-api = { workspace = true, features = ["client"] }
 reth-rpc-layer.workspace = true
-reth-rpc-types.workspace = true
 reth-transaction-pool.workspace = true
 reth-consensus.workspace = true
 reth-ethereum-payload-builder.workspace = true
 reth-primitives.workspace = true
-reth-cli-commands = { workspace = true, features = ["dev"] }
+reth-cli-commands.workspace = true
 reth-pipe-exec-layer-ext-v2.workspace = true
 reqwest.workspace = true
 async-trait.workspace = true
@@ -199,6 +196,7 @@ members = [
     "examples/custom-beacon-withdrawals",
     "testing/ef-tests/",
     "testing/testing-utils",
+    "crates/pipe-exec-layer-ext-v2/",
 ]
 default-members = ["bin/reth"]
 exclude = ["book/sources"]
@@ -443,6 +441,7 @@ reth-provider = { path = "crates/storage/provider" }
 reth-prune = { path = "crates/prune/prune" }
 reth-prune-types = { path = "crates/prune/types" }
 reth-revm = { path = "crates/revm", default-features = false }
+reth-grevm = { package = "grevm", git = "https://github.com/nekomoto911/grevm", branch = "revm-19.5.0" }
 reth-rpc = { path = "crates/rpc/rpc" }
 reth-rpc-api = { path = "crates/rpc/rpc-api" }
 reth-rpc-api-testing-util = { path = "crates/rpc/rpc-testing-util" }
@@ -471,12 +470,14 @@ reth-trie-db = { path = "crates/trie/db" }
 reth-trie-parallel = { path = "crates/trie/parallel" }
 reth-trie-sparse = { path = "crates/trie/sparse" }
 reth-zstd-compressors = { path = "crates/storage/zstd-compressors", default-features = false }
+reth-pipe-exec-layer-ext-v2 = { path = "crates/pipe-exec-layer-ext-v2" }
+gravity-storage = { path = "crates/gravity-storage" }
 
 # revm
-revm = { version = "19.5.0", default-features = false }
-revm-primitives = { version = "15.2.0", default-features = false }
-revm-interpreter = { version = "15.2.0", default-features = false }
-revm-inspectors = "0.15.0"
+revm = { package = "revm", git = "https://github.com/Galxe/revm", branch = "v19.5.0-gravity", default-features = false }
+revm-primitives = { package = "revm-primitives", git = "https://github.com/Galxe/revm", branch = "v19.5.0-gravity", default-features = false }
+revm-interpreter = { package = "revm-interpreter", git = "https://github.com/Galxe/revm", branch = "v19.5.0-gravity", default-features = false }
+revm-inspectors = { git = "https://github.com/Galxe/revm-inspectors", branch = "v0.15.0-gravity" }
 
 # eth
 alloy-chains = { version = "0.1.32", default-features = false }

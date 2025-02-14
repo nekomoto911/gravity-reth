@@ -21,6 +21,7 @@ use reth_trie_db::{
     DatabaseProof, DatabaseStateRoot, DatabaseStorageProof, DatabaseStorageRoot,
     DatabaseTrieWitness, StateCommitment,
 };
+use std::sync::Arc;
 
 /// State provider over latest state that takes tx reference.
 ///

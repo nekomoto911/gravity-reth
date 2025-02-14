@@ -2,7 +2,7 @@
 //!
 //! Block processing related to syncing should take care to update the metrics by using either
 //! [`ExecutorMetrics::execute_metered`] or [`ExecutorMetrics::metered_one`].
-use crate::{execute::Executor, system_calls::OnStateHook, Database};
+use crate::{execute::Executor, system_calls::OnStateHook};
 use alloy_consensus::BlockHeader;
 use metrics::{Counter, Gauge, Histogram};
 use reth_execution_types::BlockExecutionOutput;
@@ -94,15 +94,14 @@ impl ExecutorMetrics {
     /// of accounts, storage slots and bytecodes loaded and updated.
     /// Execute the given block using the provided [`Executor`] and update metrics for the
     /// execution.
-    pub fn execute_metered<E, DB>(
+    pub fn execute_metered<'db, E>(
         &self,
         executor: E,
         input: &RecoveredBlock<<E::Primitives as NodePrimitives>::Block>,
         state_hook: Box<dyn OnStateHook>,
     ) -> Result<BlockExecutionOutput<<E::Primitives as NodePrimitives>::Receipt>, E::Error>
     where
-        DB: Database,
-        E: Executor<DB>,
+        E: Executor<'db>,
     {
         // clone here is cheap, all the metrics are Option<Arc<_>>. additionally
         // they are gloally registered so that the data recorded in the hook will

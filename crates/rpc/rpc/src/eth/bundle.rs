@@ -179,7 +179,7 @@ where
 
                     hasher.update(*tx.tx_hash());
                     let gas_price = tx.effective_gas_price(basefee);
-                    let ResultAndState { result, state } = evm
+                    let ResultAndState { result, state, .. } = evm
                         .transact(eth_api.evm_config().tx_env(&tx, signer))
                         .map_err(Eth::Error::from_evm_err)?;
 

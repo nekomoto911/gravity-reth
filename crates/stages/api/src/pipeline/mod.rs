@@ -8,8 +8,8 @@ use futures_util::Future;
 use reth_primitives_traits::constants::BEACON_CONSENSUS_REORG_UNWIND_DEPTH;
 use reth_provider::{
     providers::ProviderNodeTypes, writer::UnifiedStorageWriter, ChainStateBlockReader,
-    ChainStateBlockWriter, DatabaseProviderFactory, ProviderFactory, StageCheckpointReader,
-    StageCheckpointWriter,
+    ChainStateBlockWriter, DatabaseProviderFactory, ProviderFactory, ProviderResult,
+    StageCheckpointReader, StageCheckpointWriter, StateProviderBox, StateProviderOptions,
 };
 use reth_prune::PrunerBuilder;
 use reth_static_file::StaticFileProducer;

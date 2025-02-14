@@ -9,7 +9,7 @@ use reth_execution_types::BlockExecutionResult;
 pub use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 pub use reth_storage_errors::provider::ProviderError;
 
-use crate::{system_calls::OnStateHook, Database};
+use crate::{system_calls::OnStateHook, Database, DatabaseEnum, ParallelDatabase, State};
 use alloc::{boxed::Box, vec::Vec};
 use alloy_eips::eip7685::Requests;
 use alloy_primitives::{
@@ -18,12 +18,12 @@ use alloy_primitives::{
 };
 use reth_consensus::ConsensusError;
 use reth_primitives::{NodePrimitives, Receipt, RecoveredBlock};
-use revm::db::{states::bundle_state::BundleRetention, State};
+use revm::db::states::bundle_state::BundleRetention;
 use revm_primitives::{Account, AccountStatus, EvmState};
 
 /// A type that knows how to execute a block. It is assumed to operate on a
 /// [`crate::Evm`] internally and use [`State`] as database.
-pub trait Executor<DB: Database>: Sized {
+pub trait Executor<'db>: Sized {
     /// The primitive types used by the executor.
     type Primitives: NodePrimitives;
     /// The error type returned by the executor.
@@ -94,11 +94,11 @@ pub trait Executor<DB: Database>: Sized {
         mut f: F,
     ) -> Result<BlockExecutionOutput<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
     where
-        F: FnMut(&State<DB>),
+        F: FnMut(&dyn State),
     {
         let BlockExecutionResult { receipts, requests, gas_used } = self.execute_one(block)?;
         let mut state = self.into_state();
-        f(&state);
+        f(state.as_ref());
         Ok(BlockExecutionOutput { state: state.take_bundle(), receipts, requests, gas_used })
     }
 
@@ -119,7 +119,7 @@ pub trait Executor<DB: Database>: Sized {
     }
 
     /// Consumes the executor and returns the [`State`] containing all state changes.
-    fn into_state(self) -> State<DB>;
+    fn into_state(self) -> Box<dyn State + 'db>;
 
     /// The size hint of the batch's tracked state size.
     ///
@@ -143,20 +143,15 @@ pub trait BlockExecutorProvider: Send + Sync + Clone + Unpin + 'static {
     ///
     /// It is not expected to validate the state trie root, this must be done by the caller using
     /// the returned state.
-    type Executor<DB: Database>: Executor<
-        DB,
-        Primitives = Self::Primitives,
-        Error = BlockExecutionError,
-    >;
-
-    type ParallelProvider<'a>: ParallelExecutorProvider;
+    type Executor<'db>: Executor<'db, Primitives = Self::Primitives, Error = BlockExecutionError>;
 
     /// Creates a new executor for single block execution.
     ///
     /// This is used to execute a single block and get the changed state.
-    fn executor<DB>(&self, db: DB) -> Self::Executor<DB>
+    fn executor<'db, DB, PDB>(&self, db: DatabaseEnum<DB, PDB>) -> Self::Executor<'db>
     where
-        DB: Database;
+        DB: Database + 'db,
+        PDB: ParallelDatabase + 'db;
 }
 
 /// Helper type for the output of executing a block.
@@ -169,10 +164,7 @@ pub struct ExecuteOutput<R = Receipt> {
 }
 
 /// Defines the strategy for executing a single block.
-pub trait BlockExecutionStrategy {
-    /// Database this strategy operates on.
-    type DB: revm::Database;
-
+pub trait BlockExecutionStrategy<'db> {
     /// Primitive types used by the strategy.
     type Primitives: NodePrimitives;
 
@@ -199,13 +191,13 @@ pub trait BlockExecutionStrategy {
     ) -> Result<Requests, Self::Error>;
 
     /// Returns a reference to the current state.
-    fn state_ref(&self) -> &State<Self::DB>;
+    fn state_ref(&self) -> &dyn State;
 
     /// Returns a mutable reference to the current state.
-    fn state_mut(&mut self) -> &mut State<Self::DB>;
+    fn state_mut(&mut self) -> &mut dyn State;
 
     /// Consumes the strategy and returns inner [`State`].
-    fn into_state(self) -> State<Self::DB>;
+    fn into_state(self: Box<Self>) -> Box<dyn State + 'db>;
 
     /// Sets a hook to be called after each state change during execution.
     fn with_state_hook(&mut self, _hook: Option<Box<dyn OnStateHook>>) {}
@@ -221,22 +213,22 @@ pub trait BlockExecutionStrategy {
     }
 }
 
+pub type StrategyBox<'db, Primitives, Error> =
+    Box<dyn BlockExecutionStrategy<'db, Primitives = Primitives, Error = Error> + 'db>;
+
 /// A strategy factory that can create block execution strategies.
 pub trait BlockExecutionStrategyFactory: Send + Sync + Clone + Unpin + 'static {
     /// Primitive types used by the strategy.
     type Primitives: NodePrimitives;
 
-    /// Associated strategy type.
-    type Strategy<DB: Database>: BlockExecutionStrategy<
-        DB = DB,
-        Primitives = Self::Primitives,
-        Error = BlockExecutionError,
-    >;
-
     /// Creates a strategy using the give database.
-    fn create_strategy<DB>(&self, db: DB) -> Self::Strategy<DB>
+    fn create_strategy<'db, DB, PDB>(
+        &self,
+        db: DatabaseEnum<DB, PDB>,
+    ) -> StrategyBox<'db, Self::Primitives, BlockExecutionError>
     where
-        DB: Database;
+        DB: Database + 'db,
+        PDB: ParallelDatabase + 'db;
 }
 
 impl<F> Clone for BasicBlockExecutorProvider<F>
@@ -267,11 +259,12 @@ where
 {
     type Primitives = F::Primitives;
 
-    type Executor<DB: Database> = BasicBlockExecutor<F::Strategy<DB>>;
+    type Executor<'db> = BasicBlockExecutor<'db, Self::Primitives>;
 
-    fn executor<DB>(&self, db: DB) -> Self::Executor<DB>
+    fn executor<'db, DB, PDB>(&self, db: DatabaseEnum<DB, PDB>) -> Self::Executor<'db>
     where
-        DB: Database,
+        DB: Database + 'db,
+        PDB: ParallelDatabase + 'db,
     {
         let strategy = self.strategy_factory.create_strategy(db);
         BasicBlockExecutor::new(strategy)
@@ -281,25 +274,24 @@ where
 /// A generic block executor that uses a [`BlockExecutionStrategy`] to
 /// execute blocks.
 #[allow(missing_debug_implementations, dead_code)]
-pub struct BasicBlockExecutor<S> {
+pub struct BasicBlockExecutor<'db, Primitives> {
     /// Block execution strategy.
-    pub(crate) strategy: S,
+    pub(crate) strategy: StrategyBox<'db, Primitives, BlockExecutionError>,
 }
 
-impl<S> BasicBlockExecutor<S> {
+impl<'db, Primitives> BasicBlockExecutor<'db, Primitives> {
     /// Creates a new `BasicBlockExecutor` with the given strategy.
-    pub const fn new(strategy: S) -> Self {
+    pub const fn new(strategy: StrategyBox<'db, Primitives, BlockExecutionError>) -> Self {
         Self { strategy }
     }
 }
 
-impl<S, DB> Executor<DB> for BasicBlockExecutor<S>
+impl<'db, Primitives> Executor<'db> for BasicBlockExecutor<'db, Primitives>
 where
-    S: BlockExecutionStrategy<DB = DB>,
-    DB: Database,
+    Primitives: NodePrimitives,
 {
-    type Primitives = S::Primitives;
-    type Error = S::Error;
+    type Primitives = Primitives;
+    type Error = BlockExecutionError;
 
     fn execute_one(
         &mut self,
@@ -329,12 +321,12 @@ where
         result
     }
 
-    fn into_state(self) -> State<DB> {
+    fn into_state(self) -> Box<dyn State + 'db> {
         self.strategy.into_state()
     }
 
     fn size_hint(&self) -> usize {
-        self.strategy.state_ref().bundle_state.size_hint()
+        self.strategy.state_ref().bundle_size_hint()
     }
 }
 
@@ -343,7 +335,7 @@ where
 /// Zero balance increments are ignored and won't create state entries.
 pub fn balance_increment_state<DB>(
     balance_increments: &HashMap<Address, u128, DefaultHashBuilder>,
-    state: &mut State<DB>,
+    state: &mut revm::db::states::State<DB>,
 ) -> Result<EvmState, BlockExecutionError>
 where
     DB: Database,
@@ -508,15 +500,15 @@ mod tests {
             Ok(self.apply_post_execution_changes_result.clone())
         }
 
-        fn state_ref(&self) -> &State<DB> {
+        fn state_ref(&self) -> &dyn State {
             &self.state
         }
 
-        fn state_mut(&mut self) -> &mut State<DB> {
+        fn state_mut(&mut self) -> &mut dyn State {
             &mut self.state
         }
 
-        fn into_state(self) -> State<Self::DB> {
+        fn into_state(self) -> Box<dyn State> {
             self.state
         }
     }

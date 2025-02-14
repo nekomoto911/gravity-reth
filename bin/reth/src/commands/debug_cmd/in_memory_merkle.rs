@@ -16,7 +16,11 @@ use reth_cli_runner::CliContext;
 use reth_cli_util::get_secret_key;
 use reth_config::Config;
 use reth_ethereum_primitives::EthPrimitives;
-use reth_evm::execute::{BlockExecutorProvider, Executor};
+use reth_evm::{
+    database::*,
+    execute::{BlockExecutorProvider, Executor},
+    parallel_database,
+};
 use reth_execution_types::ExecutionOutcome;
 use reth_network::{BlockDownloaderProvider, NetworkHandle};
 use reth_network_api::NetworkInfo;
@@ -147,7 +151,8 @@ impl<C: ChainSpecParser<ChainSpec = ChainSpec>> Command<C> {
         let state_provider = LatestStateProviderRef::new(&provider);
         let db = StateProviderDatabase::new(&state_provider);
 
-        let executor = EthExecutorProvider::ethereum(provider_factory.chain_spec()).executor(db);
+        let executor = EthExecutorProvider::ethereum(provider_factory.chain_spec())
+            .executor(parallel_database!(db));
         let block_execution_output = executor.execute(&block.clone().try_recover()?)?;
         let execution_outcome = ExecutionOutcome::from((block_execution_output, block.number()));
 

@@ -2,6 +2,7 @@
 
 use crate::{
     dao_fork::{DAO_HARDFORK_ACCOUNTS, DAO_HARDFORK_BENEFICIARY},
+    parallel_execute::GrevmExecutionStrategy,
     EthEvmConfig,
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
@@ -11,13 +12,15 @@ use reth_chainspec::{ChainSpec, EthereumHardfork, EthereumHardforks, MAINNET};
 use reth_consensus::ConsensusError;
 use reth_ethereum_consensus::validate_block_post_execution;
 use reth_evm::{
+    database::*,
     execute::{
         balance_increment_state, BasicBlockExecutorProvider, BlockExecutionError,
         BlockExecutionStrategy, BlockExecutionStrategyFactory, BlockValidationError, ExecuteOutput,
+        StrategyBox,
     },
     state_change::post_block_balance_increments,
     system_calls::{OnStateHook, SystemCaller},
-    ConfigureEvm, Database, Evm,
+    ConfigureEvm, Evm,
 };
 use reth_primitives::{EthPrimitives, Receipt, RecoveredBlock};
 use reth_primitives_traits::{BlockBody, SignedTransaction};
@@ -66,15 +69,33 @@ where
 {
     type Primitives = EthPrimitives;
 
-    type Strategy<DB: Database> = EthExecutionStrategy<DB, EvmConfig>;
-
-    fn create_strategy<DB>(&self, db: DB) -> Self::Strategy<DB>
+    fn create_strategy<'db, DB, PDB>(
+        &self,
+        db: DatabaseEnum<DB, PDB>,
+    ) -> StrategyBox<'db, Self::Primitives, BlockExecutionError>
     where
-        DB: Database,
+        DB: Database + 'db,
+        PDB: ParallelDatabase + 'db,
     {
-        let state =
-            State::builder().with_database(db).with_bundle_update().without_state_clear().build();
-        EthExecutionStrategy::new(state, self.chain_spec.clone(), self.evm_config.clone())
+        match db {
+            DatabaseEnum::Serial(db) => {
+                let state = State::builder()
+                    .with_database(db)
+                    .with_bundle_update()
+                    .without_state_clear()
+                    .build();
+                Box::new(EthExecutionStrategy::new(
+                    state,
+                    self.chain_spec.clone(),
+                    self.evm_config.clone(),
+                ))
+            }
+            DatabaseEnum::Parallel(db) => Box::new(GrevmExecutionStrategy::new(
+                db,
+                self.chain_spec.clone(),
+                self.evm_config.clone(),
+            )),
+        }
     }
 }
 
@@ -105,15 +126,14 @@ where
     }
 }
 
-impl<DB, EvmConfig> BlockExecutionStrategy for EthExecutionStrategy<DB, EvmConfig>
+impl<'db, DB, EvmConfig> BlockExecutionStrategy<'db> for EthExecutionStrategy<DB, EvmConfig>
 where
-    DB: Database,
+    DB: Database + 'db,
     EvmConfig: ConfigureEvm<
         Header = alloy_consensus::Header,
         Transaction = reth_primitives::TransactionSigned,
     >,
 {
-    type DB = DB;
     type Error = BlockExecutionError;
     type Primitives = EthPrimitives;
 
@@ -163,7 +183,7 @@ where
                 }
             })?;
             self.system_caller.on_state(&result_and_state.state);
-            let ResultAndState { result, state } = result_and_state;
+            let ResultAndState { result, state, .. } = result_and_state;
             evm.db_mut().commit(state);
 
             // append gas used
@@ -233,16 +253,16 @@ where
         Ok(requests)
     }
 
-    fn state_ref(&self) -> &State<DB> {
+    fn state_ref(&self) -> &dyn reth_evm::State {
         &self.state
     }
 
-    fn state_mut(&mut self) -> &mut State<DB> {
+    fn state_mut(&mut self) -> &mut dyn reth_evm::State {
         &mut self.state
     }
 
-    fn into_state(self) -> State<Self::DB> {
-        self.state
+    fn into_state(self: Box<Self>) -> Box<dyn reth_evm::State + 'db> {
+        Box::new(self.state)
     }
 
     fn with_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {

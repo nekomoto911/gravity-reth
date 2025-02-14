@@ -30,17 +30,21 @@ use reth_consensus::{Consensus, FullConsensus, PostExecutionInput};
 pub use reth_engine_primitives::InvalidBlockHook;
 use reth_engine_primitives::{
     BeaconConsensusEngineEvent, BeaconEngineMessage, BeaconOnNewPayloadError, EngineTypes,
-    EngineValidator, ExecutionPayload, ForkchoiceStateTracker, OnForkChoiceUpdated,
+    EngineValidator, ExecutionPayload, ForkchoiceStateTracker, ForkchoiceStatus,
+    OnForkChoiceUpdated,
 };
 use reth_errors::{ConsensusError, ProviderResult};
 use reth_ethereum_primitives::EthPrimitives;
 use reth_evm::{
+    database::*,
     execute::BlockExecutorProvider,
+    parallel_database,
     system_calls::{NoopHook, OnStateHook},
     ConfigureEvm, Evm, TransactionEnv,
 };
 use reth_payload_builder::PayloadBuilderHandle;
 use reth_payload_primitives::{EngineApiMessageVersion, PayloadBuilderAttributes};
+use reth_pipe_exec_layer_ext_v2::{get_pipe_exec_layer_ext, PipeExecLayerEvent, PipeExecLayerExt};
 use reth_primitives_traits::{
     Block, GotExpected, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
     SignedTransaction,
@@ -770,8 +774,8 @@ where
 
     fn try_recv_pipe_exec_event(
         &self,
-        pipe_exec_layer_ext: &PipeExecLayerExtV2,
-    ) -> Result<Option<PipeExecLayerEvent>, RecvError> {
+        pipe_exec_layer_ext: &PipeExecLayerExt<N>,
+    ) -> Result<Option<PipeExecLayerEvent<N>>, RecvError> {
         if self.persistence_state.in_progress() {
             match pipe_exec_layer_ext
                 .event_rx
@@ -790,28 +794,25 @@ where
         }
     }
 
-    fn on_pipe_exec_event(&mut self, event: PipeExecLayerEvent) {
+    fn on_pipe_exec_event(&mut self, event: PipeExecLayerEvent<N>) {
         match event {
             PipeExecLayerEvent::MakeCanonical(block, tx) => {
-                debug!(target: "on_pipe_exec_event", block_number=%block.block.number, block_hash=%block.block.hash(), "Received make canonical event");
+                debug!(target: "on_pipe_exec_event",
+                    block_number=%block.recovered_block.number(),
+                    block_hash=%block.recovered_block.hash(),
+                    "Received make canonical event");
                 self.make_executed_block_canonical(block);
                 tx.send(()).unwrap();
             }
         }
     }
 
-    fn make_executed_block_canonical(&mut self, block: ExecutedBlock) {
-        let block_number = block.block.number;
-        let block_hash = block.block.hash();
+    fn make_executed_block_canonical(&mut self, block: ExecutedBlockWithTrieUpdates<N>) {
+        let block_number = block.recovered_block.number();
+        let block_hash = block.recovered_block.hash();
 
         if *reth_pipe_exec_layer_ext_v2::PIPE_VALIDATE_BLOCK_BEFORE_INSERT {
-            let block: SealedBlock = block.block.as_ref().clone();
-            let block = block.seal_with_senders().unwrap_or_else(|| {
-                panic!(
-                    "Failed to recover transaction senders, block_number={block_number} block_hash={block_hash:?}",
-                )
-            });
-            self.validate_block(&block).unwrap_or_else(|err| {
+            self.validate_block(block.recovered_block()).unwrap_or_else(|err| {
                 panic!(
                     "Failed to validate block, block_number={block_number} block_hash={block_hash:?}: {err}",
                 )
@@ -829,7 +830,7 @@ where
             ForkchoiceStatus::Valid,
         );
 
-        self.make_canonical(block_hash, Some(block_hash)).unwrap_or_else(|err| {
+        self.make_canonical(block_hash).unwrap_or_else(|err| {
             panic!(
                 "Failed to make canonical, block_number={block_number} block_hash={block_hash}: {err}",
             )
@@ -847,7 +848,7 @@ where
     pub fn run(mut self) {
         // Wait for the pipe exec layer to be initialized
         std::thread::sleep(std::time::Duration::from_secs(3));
-        let pipe_exec_layer_ext = PIPE_EXEC_LAYER_EXT_V2.get();
+        let pipe_exec_layer_ext = get_pipe_exec_layer_ext::<N>();
         loop {
             match pipe_exec_layer_ext {
                 Some(ext) => match self.try_recv_pipe_exec_event(ext) {
@@ -2599,7 +2600,9 @@ where
         }
         trace!(target: "engine::tree", block=?block_num_hash, "Executing block");
 
-        let executor = self.executor_provider.executor(StateProviderDatabase::new(&state_provider));
+        let executor = self
+            .executor_provider
+            .executor(parallel_database! { StateProviderDatabase::new(&state_provider) });
         let execution_start = Instant::now();
         let output = self.metrics.executor.execute_metered(executor, &block, state_hook)?;
         let execution_time = execution_start.elapsed();

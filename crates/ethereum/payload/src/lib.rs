@@ -281,7 +281,7 @@ where
         // Configure the environment for the tx.
         let tx_env = evm_config.tx_env(tx.tx(), tx.signer());
 
-        let ResultAndState { result, state } = match evm.transact(tx_env) {
+        let ResultAndState { result, state, .. } = match evm.transact(tx_env) {
             Ok(res) => res,
             Err(err) => {
                 if let Some(err) = err.as_invalid_tx_err() {
