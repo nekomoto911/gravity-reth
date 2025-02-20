@@ -25,7 +25,7 @@ use reth_primitives_traits::{
     proofs::{self},
     Block as _, RecoveredBlock,
 };
-use std::{any::Any, collections::BTreeMap, sync::Arc, time::Instant};
+use std::{any::Any, collections::BTreeMap, sync::Arc};
 
 use once_cell::sync::{Lazy, OnceCell};
 
@@ -293,6 +293,8 @@ impl<Storage: GravityStorage> Core<Storage> {
             block.header.parent_beacon_block_root = Some(ordered_block.parent_id);
 
             // TODO(nekomoto): fill `excess_blob_gas` and `blob_gas_used` fields
+            block.header.excess_blob_gas = Some(0);
+            block.header.blob_gas_used = Some(0);
         }
 
         let (parent_id, state) = self.storage.get_state_view(block.number - 1).unwrap();
