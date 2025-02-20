@@ -11,7 +11,6 @@ use alloy_eips::{eip4895::Withdrawals, merge::BEACON_NONCE};
 use alloy_primitives::{Address, B256, U256};
 use reth_chain_state::ExecutedBlockWithTrieUpdates;
 use reth_chainspec::{ChainSpec, EthereumHardforks};
-use reth_ethereum_payload_builder::EthereumBuilderConfig;
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
 use reth_evm::{
     database::*,
@@ -91,7 +90,6 @@ struct Core<Storage: GravityStorage> {
     verified_block_hash_rx: Arc<Channel<B256 /* block id */, B256 /* block hash */>>,
     storage: Storage,
     evm_config: EthEvmConfig,
-    builder_config: EthereumBuilderConfig,
     chain_spec: Arc<ChainSpec>,
     event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
     execute_block_barrier: Channel<u64 /* block number */, (Header, Instant)>,
@@ -130,6 +128,8 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
         }
     }
 }
+
+const BLOCK_GAS_LIMIT_1G: u64 = 1_000_000_000;
 
 impl<Storage: GravityStorage> Core<Storage> {
     async fn process(&self, ordered_block: OrderedBlock) {
@@ -250,7 +250,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                     timestamp: ordered_block.timestamp,
                     suggested_fee_recipient: ordered_block.coinbase,
                     prev_randao: ordered_block.prev_randao,
-                    gas_limit: self.builder_config.gas_limit(parent_header.gas_limit),
+                    gas_limit: BLOCK_GAS_LIMIT_1G,
                 },
             )
             .unwrap();
@@ -264,7 +264,7 @@ impl<Storage: GravityStorage> Core<Storage> {
                 nonce: BEACON_NONCE.into(),
                 base_fee_per_gas: Some(evm_env.block_env.basefee.to::<u64>()),
                 number: ordered_block.number,
-                gas_limit: evm_env.block_env.gas_limit.to::<u64>(),
+                gas_limit: evm_env.block_env.gas_limit.to(),
                 difficulty: U256::ZERO,
                 ..Default::default()
             },
@@ -449,7 +449,6 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
             verified_block_hash_rx: verified_block_hash_ch.clone(),
             storage,
             evm_config: EthEvmConfig::new(chain_spec.clone()),
-            builder_config: EthereumBuilderConfig::new(Default::default()),
             chain_spec,
             event_tx,
             execute_block_barrier: Channel::new_with_states([(
