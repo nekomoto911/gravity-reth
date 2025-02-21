@@ -24,7 +24,7 @@ use reth_primitives_traits::{
     proofs::{self},
     Block as _, RecoveredBlock,
 };
-use std::{any::Any, collections::BTreeMap, sync::Arc};
+use std::{any::Any, collections::BTreeMap, sync::Arc, time::Instant};
 
 use once_cell::sync::{Lazy, OnceCell};
 
