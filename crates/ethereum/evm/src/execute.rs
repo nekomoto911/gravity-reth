@@ -2,6 +2,7 @@
 
 use crate::{
     dao_fork::{DAO_HARDFORK_ACCOUNTS, DAO_HARDFORK_BENEFICIARY},
+    debug_ext::DEBUG_EXT,
     parallel_execute::GrevmExecutionStrategy,
     EthEvmConfig,
 };
@@ -24,7 +25,7 @@ use reth_evm::{
 };
 use reth_primitives::{EthPrimitives, Receipt, RecoveredBlock};
 use reth_primitives_traits::{BlockBody, SignedTransaction};
-use revm::db::State;
+use revm::db::{State, WrapDatabaseRef};
 use revm_primitives::{db::DatabaseCommit, ResultAndState};
 
 /// Factory for [`EthExecutionStrategy`].
@@ -90,11 +91,26 @@ where
                     self.evm_config.clone(),
                 ))
             }
-            DatabaseEnum::Parallel(db) => Box::new(GrevmExecutionStrategy::new(
-                db,
-                self.chain_spec.clone(),
-                self.evm_config.clone(),
-            )),
+            DatabaseEnum::Parallel(db) => {
+                if DEBUG_EXT.disable_grevm {
+                    let state = State::builder()
+                        .with_database(WrapDatabaseRef(db))
+                        .with_bundle_update()
+                        .without_state_clear()
+                        .build();
+                    Box::new(EthExecutionStrategy::new(
+                        state,
+                        self.chain_spec.clone(),
+                        self.evm_config.clone(),
+                    ))
+                } else {
+                    Box::new(GrevmExecutionStrategy::new(
+                        db,
+                        self.chain_spec.clone(),
+                        self.evm_config.clone(),
+                    ))
+                }
+            }
         }
     }
 }

@@ -1,5 +1,8 @@
 //use crate::debug_ext::DEBUG_EXT;
-use crate::dao_fork::{DAO_HARDFORK_ACCOUNTS, DAO_HARDFORK_BENEFICIARY};
+use crate::{
+    dao_fork::{DAO_HARDFORK_ACCOUNTS, DAO_HARDFORK_BENEFICIARY},
+    debug_ext::DEBUG_EXT,
+};
 use alloy_consensus::BlockHeader;
 use alloy_eips::{eip6110, eip7685::Requests};
 use alloy_primitives::{
@@ -13,11 +16,15 @@ use reth_evm::{
     execute::{BlockExecutionError, BlockExecutionStrategy, BlockValidationError, ExecuteOutput},
     state_change::post_block_balance_increments,
     system_calls::{OnStateHook, SystemCaller},
-    ConfigureEvm, ParallelDatabase,
+    ConfigureEvm, Evm, ParallelDatabase,
 };
 use reth_grevm::{ParallelState, Scheduler};
 use reth_primitives::{EthPrimitives, Receipt, RecoveredBlock};
-use revm::db::WrapDatabaseRef;
+use reth_primitives_traits::SignedTransaction;
+use revm::{
+    db::{states::State, WrapDatabaseRef},
+    DatabaseCommit,
+};
 use revm_primitives::{Account, AccountStatus, EvmState};
 use std::sync::Arc;
 
@@ -87,23 +94,93 @@ where
             txs.push(self.evm_config.tx_env(tx, *sender).into());
         }
 
-        let executor = Scheduler::new(
-            evm_env.spec.into(),
-            revm_primitives::Env {
-                cfg: evm_env.cfg_env,
-                block: evm_env.block_env,
-                ..Default::default()
-            },
-            Arc::new(txs),
-            self.state.take().unwrap(),
-            true,
-        );
+        let spec_id = evm_env.spec.into();
+        let env = revm_primitives::Env {
+            cfg: evm_env.cfg_env,
+            block: evm_env.block_env,
+            ..Default::default()
+        };
+        let txs = Arc::new(txs);
+        let state = self.state.take().unwrap();
 
-        executor.parallel_execute(None).map_err(|e| BlockValidationError::EVM {
-            hash: Default::default(),
-            error: Box::new(e),
-        })?;
-        let (results, state) = executor.take_result_and_state();
+        let (results, state) = if DEBUG_EXT.compare_with_seq_exec {
+            let seq_state = {
+                let mut seq_state = State::builder()
+                    .with_database_ref(&state.database)
+                    .with_bundle_update()
+                    .build();
+                seq_state.set_state_clear_flag(state.cache.has_state_clear);
+                seq_state.cache.accounts.extend(state.cache.accounts.clone());
+                seq_state.cache.contracts.extend(state.cache.contracts.clone());
+                seq_state.block_hashes.extend(state.block_hashes.clone());
+                let mut evm = self.evm_config.evm_for_block(&mut seq_state, block.header());
+                for (sender, tx) in block.transactions_with_sender() {
+                    let result_and_state =
+                        evm.transact(self.evm_config.tx_env(tx, *sender)).map_err(move |err| {
+                            // Ensure hash is calculated for error log, if not already done
+                            BlockValidationError::EVM {
+                                hash: tx.recalculate_hash(),
+                                error: Box::new(err),
+                            }
+                        })?;
+                    evm.db_mut().commit(result_and_state.state);
+                }
+                drop(evm);
+                (seq_state.transition_state, seq_state.cache, seq_state.block_hashes)
+            };
+
+            let executor =
+                Scheduler::new(spec_id, env.clone(), txs.clone(), state, DEBUG_EXT.with_hints);
+            let output = executor.parallel_execute(None).map_err(|e| BlockValidationError::EVM {
+                hash: Default::default(),
+                error: Box::new(e),
+            });
+            let (results, parallel_state) = executor.take_result_and_state();
+
+            if output.is_err() ||
+                !crate::debug_ext::compare_transition_state(
+                    seq_state.0.as_ref().unwrap(),
+                    parallel_state.transition_state.as_ref().unwrap(),
+                )
+            {
+                crate::debug_ext::dump_transitions(
+                    block.number,
+                    seq_state.0.as_ref().unwrap(),
+                    "seq_transitions.json",
+                )
+                .unwrap();
+                crate::debug_ext::dump_transitions(
+                    block.number,
+                    parallel_state.transition_state.as_ref().unwrap(),
+                    "parallel_transitions.json",
+                )
+                .unwrap();
+                crate::debug_ext::dump_block_env(
+                    &revm_primitives::EnvWithHandlerCfg::new_with_spec_id(Box::new(env), spec_id),
+                    &txs.as_ref(),
+                    &seq_state.1,
+                    &seq_state.0.as_ref().unwrap(),
+                    &seq_state.2,
+                )
+                .unwrap();
+                panic!("Transition state mismatch, block number: {}", block.number);
+            }
+
+            output.map_err(|e| BlockValidationError::EVM {
+                hash: Default::default(),
+                error: Box::new(e),
+            })?;
+
+            (results, parallel_state)
+        } else {
+            let executor = Scheduler::new(spec_id, env, txs, state, DEBUG_EXT.with_hints);
+            executor.parallel_execute(None).map_err(|e| BlockValidationError::EVM {
+                hash: Default::default(),
+                error: Box::new(e),
+            })?;
+            executor.take_result_and_state()
+        };
+
         self.state = Some(state);
 
         let mut receipts = Vec::with_capacity(results.len());
