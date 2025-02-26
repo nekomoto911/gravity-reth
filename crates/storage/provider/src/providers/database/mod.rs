@@ -172,7 +172,16 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
     #[track_caller]
     pub fn latest(&self, opts: StateProviderOptions) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::db", "Returning latest state provider");
-        Ok(Box::new(LatestStateProvider::new(self.database_provider_ro()?)))
+
+        let factory = || {
+            Ok(Box::new(LatestStateProvider::new(self.database_provider_ro()?)) as StateProviderBox)
+        };
+
+        if opts.parallel.get() > 1 {
+            Ok(Box::new(ParallelStateProvider::try_new(factory, opts.parallel.get())?))
+        } else {
+            factory()
+        }
     }
 
     /// Storage provider for state at that given block
