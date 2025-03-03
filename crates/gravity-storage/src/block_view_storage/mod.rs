@@ -16,6 +16,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
 };
+use tracing::*;
 
 use crate::{GravityStorage, GravityStorageError};
 
@@ -141,6 +142,15 @@ impl<Client: StateProviderFactory + 'static> GravityStorage for BlockViewStorage
         let hashed_state = Arc::new(HashedPostState::from_bundle_state(&bundle_state.state));
         let mut storage = self.inner.lock().unwrap();
         storage.block_number_to_view.insert(block_number, (Arc::new(block_view), hashed_state));
+        let cached_block_views = storage.block_number_to_view.len();
+        drop(storage);
+        debug!(
+            target: "BlockViewStorage",
+            block_number=block_number,
+            size=bundle_state.size_hint(),
+            cached_block_views=cached_block_views,
+            "inserted block view"
+        );
     }
 
     fn update_canonical(&self, block_number: u64, block_hash: B256) {
