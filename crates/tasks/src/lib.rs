@@ -312,6 +312,7 @@ impl TaskExecutor {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        debug!(target: "TaskExecutor", "spawn_on_rt: {}", std::backtrace::Backtrace::force_capture());
         match task_kind {
             TaskKind::Default => self.handle.spawn(fut),
             TaskKind::Blocking => {
