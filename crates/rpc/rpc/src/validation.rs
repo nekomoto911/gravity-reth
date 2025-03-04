@@ -172,13 +172,15 @@ where
 
         let mut accessed_blacklisted = None;
         let output = executor.execute_with_state_closure(&block, |state| {
-            if !self.disallow.is_empty() {
-                state.for_each_accounts(&mut |(address, _)| {
-                    if self.disallow.contains(address) {
-                        accessed_blacklisted = Some(*address);
-                    }
-                });
-            }
+            // TODO(nekomoto)
+            //if !self.disallow.is_empty() {
+            //    state.for_each_accounts(&mut |(address, _)| {
+            //        if self.disallow.contains(address) {
+            //            accessed_blacklisted = Some(*address);
+            //        }
+            //    });
+            //}
+            todo!()
         })?;
 
         // update the cached reads

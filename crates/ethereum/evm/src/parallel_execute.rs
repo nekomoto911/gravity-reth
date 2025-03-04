@@ -22,7 +22,10 @@ use reth_grevm::{ParallelState, Scheduler};
 use reth_primitives::{EthPrimitives, Receipt, RecoveredBlock};
 use reth_primitives_traits::SignedTransaction;
 use revm::{
-    db::{states::State, WrapDatabaseRef},
+    db::{
+        states::{CacheAccount, State},
+        PlainAccount, WrapDatabaseRef,
+    },
     DatabaseCommit,
 };
 use revm_primitives::{Account, AccountStatus, EvmState};
@@ -52,7 +55,12 @@ where
     /// Creates a new [`EthExecutionStrategy`]
     pub fn new(db: DB, chain_spec: Arc<ChainSpec>, evm_config: EvmConfig) -> Self {
         let system_caller = SystemCaller::new(evm_config.clone(), chain_spec.clone());
-        Self { state: Some(ParallelState::new(db, true)), chain_spec, evm_config, system_caller }
+        Self {
+            state: Some(ParallelState::new(db, true, false)),
+            chain_spec,
+            evm_config,
+            system_caller,
+        }
     }
 }
 
@@ -109,10 +117,10 @@ where
                     .with_database_ref(&state.database)
                     .with_bundle_update()
                     .build();
-                seq_state.set_state_clear_flag(state.cache.has_state_clear);
-                seq_state.cache.accounts.extend(state.cache.accounts.clone());
-                seq_state.cache.contracts.extend(state.cache.contracts.clone());
-                seq_state.block_hashes.extend(state.block_hashes.clone());
+                seq_state.cache = state.cache.as_cache_state();
+                seq_state.block_hashes.extend(
+                    state.block_hashes.iter().map(|entry| (*entry.key(), entry.value().clone())),
+                );
                 let mut evm = self.evm_config.evm_for_block(&mut seq_state, block.header());
                 for (sender, tx) in block.transactions_with_sender() {
                     let result_and_state =
@@ -286,21 +294,16 @@ where
     DB: ParallelDatabase,
 {
     let mut load_account = |address: &Address| -> Result<(Address, Account), BlockExecutionError> {
-        let cache_account = state.load_cache_account(*address).map_err(|_| {
-            BlockExecutionError::msg("could not load account for balance increment")
-        })?;
-
-        let account = cache_account.account.as_ref().ok_or_else(|| {
-            BlockExecutionError::msg("could not load account for balance increment")
-        })?;
+        let info = state
+            .cache
+            .accounts
+            .get(address)
+            .and_then(|account| account.value().account.clone())
+            .ok_or(BlockExecutionError::msg("could not load account for balance increment"))?;
 
         Ok((
             *address,
-            Account {
-                info: account.info.clone(),
-                storage: Default::default(),
-                status: AccountStatus::Touched,
-            },
+            Account { info, storage: Default::default(), status: AccountStatus::Touched },
         ))
     };
 

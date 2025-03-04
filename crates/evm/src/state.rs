@@ -11,8 +11,6 @@ pub trait State {
     fn take_bundle(&mut self) -> BundleState;
 
     fn merge_transitions(&mut self, retention: BundleRetention);
-
-    fn for_each_accounts(&self, f: &mut dyn FnMut((&Address, &CacheAccount)));
 }
 
 impl<DB> State for revm::db::states::State<DB>
@@ -30,10 +28,6 @@ where
     fn merge_transitions(&mut self, retention: BundleRetention) {
         self.merge_transitions(retention);
     }
-
-    fn for_each_accounts(&self, f: &mut dyn FnMut((&Address, &CacheAccount))) {
-        self.cache.accounts.iter().for_each(f);
-    }
 }
 
 impl<DB> State for ParallelState<DB>
@@ -50,11 +44,5 @@ where
 
     fn merge_transitions(&mut self, retention: BundleRetention) {
         self.merge_transitions(retention);
-    }
-
-    fn for_each_accounts(&self, f: &mut dyn FnMut((&Address, &CacheAccount))) {
-        for entry in self.cache.accounts.iter() {
-            f((entry.key(), entry.value()));
-        }
     }
 }
