@@ -567,3 +567,89 @@ pub fn new_pipe_exec_layer_api<Storage: GravityStorage>(
         verified_block_hash_tx: verified_block_hash_ch,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+
+    use alloy_consensus::{Transaction as _, TxLegacy};
+    use alloy_primitives::{PrimitiveSignature as Signature, U160};
+    use reth_ethereum_primitives::Transaction;
+    use revm::primitives::Bytecode;
+
+    use super::*;
+
+    fn make_tx(nonce: u64, gas_price: u128, gas_limit: u64) -> TransactionSigned {
+        let tx =
+            Transaction::Legacy(TxLegacy { nonce, gas_price, gas_limit, ..Default::default() });
+        TransactionSigned::new_unhashed(tx, Signature::test_signature())
+    }
+
+    #[test]
+    fn test_filter_invalid_txs() {
+        struct MockDB {
+            accounts: HashMap<Address, AccountInfo>,
+        }
+
+        impl DatabaseRef for MockDB {
+            type Error = Infallible;
+
+            fn basic_ref(&self, addr: Address) -> Result<Option<AccountInfo>, Self::Error> {
+                Ok(self.accounts.get(&addr).cloned())
+            }
+
+            fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+                unreachable!()
+            }
+
+            fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
+                unreachable!()
+            }
+
+            fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
+                unreachable!()
+            }
+        }
+
+        let db = MockDB {
+            accounts: [
+                (
+                    Address::from(U160::from(1)),
+                    AccountInfo { nonce: 11, balance: U256::from(100), ..Default::default() },
+                ),
+                (
+                    Address::from(U160::from(2)),
+                    AccountInfo { nonce: 8, balance: U256::from(100), ..Default::default() },
+                ),
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+        };
+
+        let txs = vec![
+            make_tx(11, 1, 1),
+            make_tx(7, 1, 1),
+            make_tx(8, 1, 1),
+            make_tx(11, 1, 1),
+            make_tx(9, 1, 1),
+            make_tx(12, 1, 1),
+        ];
+        let senders = vec![
+            Address::from(U160::from(1)),
+            Address::from(U160::from(2)),
+            Address::from(U160::from(2)),
+            Address::from(U160::from(1)),
+            Address::from(U160::from(2)),
+            Address::from(U160::from(1)),
+        ];
+
+        let (filtered_txs, filtered_senders) = filter_invalid_txs(db, txs, senders, U256::from(1));
+        assert_eq!(filtered_txs.len(), 4);
+        assert_eq!(filtered_senders.len(), 4);
+        assert_eq!(filtered_txs[0].transaction().nonce(), 11);
+        assert_eq!(filtered_txs[1].transaction().nonce(), 8);
+        assert_eq!(filtered_txs[2].transaction().nonce(), 9);
+        assert_eq!(filtered_txs[3].transaction().nonce(), 12);
+    }
+}
