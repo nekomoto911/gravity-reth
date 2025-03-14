@@ -37,6 +37,7 @@ use tokio::sync::{
     oneshot,
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use tracing::debug;
 
 /// A _shareable_ network frontend. Used to interact with the network.
 ///
@@ -339,6 +340,7 @@ impl<N: NetworkPrimitives> Peers for NetworkHandle<N> {
         tcp_addr: SocketAddr,
         udp_addr: Option<SocketAddr>,
     ) {
+        debug!(target: "connect_peer_kind", ?peer_id, ?kind, ?tcp_addr, ?udp_addr, backtrace = ?std::backtrace::Backtrace::capture());
         self.send_message(NetworkHandleMessage::ConnectPeer(
             peer_id,
             kind,

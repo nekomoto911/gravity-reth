@@ -946,6 +946,7 @@ async fn authenticate<N: NetworkPrimitives>(
                 .await;
         }
         Either::Right((res, _)) => {
+            debug!(target: "authenticate_stream", ?remote_addr, ?session_id, ?res);
             let _ = events.send(res).await;
         }
     }

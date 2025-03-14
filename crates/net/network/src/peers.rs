@@ -33,7 +33,7 @@ use tokio::{
     time::{Instant, Interval},
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::{trace, warn};
+use tracing::{trace, warn, debug};
 
 /// Maintains the state of _all_ the peers known to the network.
 ///
@@ -804,7 +804,7 @@ impl PeersManager {
 
         match self.peers.entry(peer_id) {
             Entry::Vacant(entry) => {
-                trace!(target: "net::peers", ?peer_id, addr=?addr.tcp(), "connects new node");
+                debug!(target: "add_and_connect_kind", ?peer_id, addr=?addr.tcp(), backtrace = ?std::backtrace::Backtrace::capture());
                 let mut peer = Peer::with_kind(addr, kind);
                 peer.state = PeerConnectionState::PendingOut;
                 peer.fork_id = fork_id;
