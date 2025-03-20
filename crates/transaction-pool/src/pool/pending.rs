@@ -14,6 +14,7 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::broadcast;
+use tracing::debug;
 
 /// A pool of validated and gapless transactions that are ready to be executed on the current state
 /// and are waiting to be included in a block.
@@ -319,6 +320,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
         &mut self,
         id: &TransactionId,
     ) -> Option<Arc<ValidPoolTransaction<T::Transaction>>> {
+        debug!(target: "PendingPool::remove_transaction", ?id, backtrace = %std::backtrace::Backtrace::capture());
         if let Some(lowest) = self.independent_transactions.get(&id.sender) {
             if lowest.transaction.nonce() == id.nonce {
                 self.independent_transactions.remove(&id.sender);
