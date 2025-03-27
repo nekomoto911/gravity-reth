@@ -259,7 +259,7 @@ pub async fn maintain_transaction_pool<N, Client, P, St, Tasks>(
             }
             discard_txs = discard_txs_rx.recv() => {
                 if let Some(discard_txs) = discard_txs {
-                    debug!(target: "txpool", count=%discard_txs.len(), "discarding transactions");
+                    info!(target: "txpool", "discarding transactions {:?}", discard_txs);
                     pool.remove_transactions(discard_txs);
                 } else {
                     break;

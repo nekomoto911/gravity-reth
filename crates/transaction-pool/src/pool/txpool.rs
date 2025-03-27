@@ -37,7 +37,7 @@ use std::{
     ops::Bound::{Excluded, Unbounded},
     sync::Arc,
 };
-use tracing::trace;
+use tracing::{debug, trace};
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 // TODO: Inlined diagram due to a bug in aquamarine library, should become an include when it's
@@ -859,7 +859,7 @@ impl<T: TransactionOrdering> TxPool<T> {
             // We trace here instead of in subpool structs directly, because the `ParkedPool` type
             // is generic and it would not be possible to distinguish whether a transaction is
             // being removed from the `BaseFee` pool, or the `Queued` pool.
-            trace!(target: "txpool", hash=%tx.transaction.hash(), ?pool, "Removed transaction from a subpool");
+            debug!(target: "txpool", hash=%tx.transaction.hash(), ?pool, "Removed transaction from a subpool");
         }
 
         tx
