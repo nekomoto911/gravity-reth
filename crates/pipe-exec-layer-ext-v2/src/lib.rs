@@ -28,7 +28,12 @@ use reth_primitives_traits::{
     Block as _, RecoveredBlock,
 };
 use revm::primitives::{AccountInfo, HashMap, HashSet};
-use std::{any::Any, collections::BTreeMap, sync::Arc, time::Instant};
+use std::{
+    any::Any,
+    collections::BTreeMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use once_cell::sync::{Lazy, OnceCell};
 
@@ -272,7 +277,17 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
         let finish_commit_time = Instant::now();
         self.metrics.make_canonical_duration.record(elapsed);
-        self.metrics.finish_commit_time_diff.record(finish_commit_time - prev_finish_commit_time);
+        let finish_commit_time_diff = finish_commit_time - start_time;
+        if finish_commit_time_diff > Duration::from_millis(500) {
+            warn!(target: "PipeExecService.process",
+                block_number=?block_number,
+                block_id=?block_id,
+                block_hash=?block_hash,
+                finish_commit_time_diff=?finish_commit_time_diff,
+                "block commit time diff is too long"
+            );
+        }
+        self.metrics.finish_commit_time_diff.record(finish_commit_time_diff);
         self.make_canonical_barrier.notify(block_number, finish_commit_time).unwrap();
 
         self.metrics.total_gas_used.increment(gas_used);
