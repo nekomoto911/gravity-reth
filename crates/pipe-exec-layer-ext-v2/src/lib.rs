@@ -277,7 +277,7 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
         let finish_commit_time = Instant::now();
         self.metrics.make_canonical_duration.record(elapsed);
-        let finish_commit_time_diff = finish_commit_time - start_time;
+        let finish_commit_time_diff = finish_commit_time - prev_finish_commit_time;
         if finish_commit_time_diff > Duration::from_millis(500) {
             warn!(target: "PipeExecService.process",
                 block_number=?block_number,
