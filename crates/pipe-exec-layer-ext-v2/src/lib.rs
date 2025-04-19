@@ -130,6 +130,7 @@ struct Core<Storage: GravityStorage> {
 impl<Storage: GravityStorage> PipeExecService<Storage> {
     async fn run(mut self) {
         self.core.init_storage(self.execution_args_rx.await.unwrap());
+        let mut prev_not_empty_block_time = Instant::now();
         loop {
             let start_time = Instant::now();
             let ordered_block = match self.ordered_block_rx.recv().await {
@@ -141,12 +142,20 @@ impl<Storage: GravityStorage> PipeExecService<Storage> {
                     return;
                 }
             };
-            let elapsed = start_time.elapsed();
-            self.core.metrics.recv_block_time_diff.record(elapsed);
+            let recv_time = Instant::now();
+            if !ordered_block.transactions.is_empty() {
+                self.core
+                    .metrics
+                    .recv_block_time_diff
+                    .record(recv_time - prev_not_empty_block_time);
+                prev_not_empty_block_time = recv_time;
+            }
+            let elapsed = recv_time - start_time;
             info!(target: "PipeExecService.run",
                 id=?ordered_block.id,
                 parent_id=?ordered_block.parent_id,
                 number=?ordered_block.number,
+                num_txs=?ordered_block.transactions.len(),
                 elapsed=?elapsed,
                 "new ordered block"
             );
@@ -170,6 +179,8 @@ struct ExecuteOrderedBlockResult {
 
 impl<Storage: GravityStorage> Core<Storage> {
     async fn process(&self, ordered_block: OrderedBlock) {
+        let is_block_empty = ordered_block.transactions.is_empty();
+
         let block_number = ordered_block.number;
         let block_id = ordered_block.id;
 
@@ -186,14 +197,21 @@ impl<Storage: GravityStorage> Core<Storage> {
         info!(target: "PipeExecService.process",
             block_number=?block_number,
             block_id=?block_id,
+            num_txs=?block_without_roots.transaction_count(),
             gas_used=execution_output.gas_used,
             elapsed=?elapsed,
             "block executed"
         );
+
         self.metrics.execute_duration.record(elapsed);
-        self.metrics.start_execute_time_diff.record(start_time - prev_start_execute_time);
+        let start_execute_time = if !is_block_empty {
+            self.metrics.start_execute_time_diff.record(start_time - prev_start_execute_time);
+            start_time
+        } else {
+            prev_start_execute_time
+        };
         self.execute_block_barrier
-            .notify(block_number, (block_without_roots.header().clone(), start_time))
+            .notify(block_number, (block_without_roots.header().clone(), start_execute_time))
             .unwrap();
 
         let (mut block, senders) = block_without_roots.split();
@@ -277,17 +295,22 @@ impl<Storage: GravityStorage> Core<Storage> {
         );
         let finish_commit_time = Instant::now();
         self.metrics.make_canonical_duration.record(elapsed);
-        let finish_commit_time_diff = finish_commit_time - prev_finish_commit_time;
-        if finish_commit_time_diff > Duration::from_millis(500) {
-            warn!(target: "PipeExecService.process",
-                block_number=?block_number,
-                block_id=?block_id,
-                block_hash=?block_hash,
-                finish_commit_time_diff=?finish_commit_time_diff,
-                "block commit time diff is too long"
-            );
-        }
-        self.metrics.finish_commit_time_diff.record(finish_commit_time_diff);
+        let finish_commit_time = if !is_block_empty {
+            let finish_commit_time_diff = finish_commit_time - prev_finish_commit_time;
+            if finish_commit_time_diff > Duration::from_millis(500) {
+                warn!(target: "PipeExecService.process",
+                    block_number=?block_number,
+                    block_id=?block_id,
+                    block_hash=?block_hash,
+                    finish_commit_time_diff=?finish_commit_time_diff,
+                    "block commit time diff is too long"
+                );
+            }
+            self.metrics.finish_commit_time_diff.record(finish_commit_time_diff);
+            finish_commit_time
+        } else {
+            prev_finish_commit_time
+        };
         self.make_canonical_barrier.notify(block_number, finish_commit_time).unwrap();
 
         self.metrics.total_gas_used.increment(gas_used);
