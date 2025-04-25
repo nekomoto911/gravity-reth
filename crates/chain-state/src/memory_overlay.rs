@@ -3,7 +3,9 @@ use alloy_consensus::BlockHeader;
 use alloy_primitives::{
     keccak256, map::B256Map, Address, BlockNumber, Bytes, StorageKey, StorageValue, B256,
 };
+use once_cell::sync::Lazy;
 use reth_errors::ProviderResult;
+use reth_metrics::{metrics::Histogram, Metrics};
 use reth_primitives::{Account, Bytecode, NodePrimitives};
 use reth_storage_api::{
     AccountReader, BlockHashReader, HashedPostStateProvider, StateProofProvider, StateProvider,
@@ -14,7 +16,22 @@ use reth_trie::{
     MultiProofTargets, StorageMultiProof, TrieInput,
 };
 use revm::db::BundleState;
-use std::sync::{Arc, OnceLock};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Instant,
+};
+
+#[derive(Metrics)]
+#[metrics(scope = "memory_overlay")]
+struct MemoryOverlayStateProviderMetrics {
+    /// How long it took for prepending not canonical state to state root input
+    state_root_prepend_noncanonical_state_duration: Histogram,
+    /// How long it took for prepending canonical state to state root input
+    state_root_prepend_canonical_state_duration: Histogram,
+}
+
+static METRICS: Lazy<MemoryOverlayStateProviderMetrics> =
+    Lazy::new(MemoryOverlayStateProviderMetrics::default);
 
 /// A state provider that stores references to in-memory blocks along with their state as well as a
 /// reference of the historical state provider for fallback lookups.
@@ -135,6 +152,7 @@ impl<N: NodePrimitives> StateRootProvider for MemoryOverlayStateProviderRef<'_, 
         trie_updates_vec: Vec<Arc<TrieUpdates>>,
     ) -> ProviderResult<(B256, TrieUpdates)> {
         let mut input = TrieInput::from_state(state);
+        let start_time = Instant::now();
         let mut trie_state = MemoryOverlayTrieState::default();
         hashed_state_vec.iter().for_each(|hashed_state| {
             trie_state.state.extend_ref(hashed_state.as_ref());
@@ -144,6 +162,7 @@ impl<N: NodePrimitives> StateRootProvider for MemoryOverlayStateProviderRef<'_, 
         });
         let MemoryOverlayTrieState { nodes, state } = trie_state;
         input.prepend_cached(nodes, state);
+        METRICS.state_root_prepend_noncanonical_state_duration.record(start_time.elapsed());
         self.state_root_from_nodes_with_updates(input)
     }
 
@@ -151,8 +170,10 @@ impl<N: NodePrimitives> StateRootProvider for MemoryOverlayStateProviderRef<'_, 
         &self,
         mut input: TrieInput,
     ) -> ProviderResult<(B256, TrieUpdates)> {
+        let start_time = Instant::now();
         let MemoryOverlayTrieState { nodes, state } = self.trie_state().clone();
         input.prepend_cached(nodes, state);
+        METRICS.state_root_prepend_canonical_state_duration.record(start_time.elapsed());
         self.historical.state_root_from_nodes_with_updates(input)
     }
 }

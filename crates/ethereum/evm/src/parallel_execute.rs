@@ -20,10 +20,7 @@ use reth_evm::{
     ConfigureEvm, Evm, ParallelDatabase,
 };
 use reth_grevm::{ParallelState, Scheduler};
-use reth_metrics::{
-    metrics::{Counter, Histogram},
-    Metrics,
-};
+use reth_metrics::{metrics::Histogram, Metrics};
 use reth_primitives::{EthPrimitives, Receipt, RecoveredBlock};
 use reth_primitives_traits::SignedTransaction;
 use revm::{
