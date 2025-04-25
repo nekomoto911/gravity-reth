@@ -56,6 +56,8 @@ struct ParallelExecuteMetrics {
     new_scheduler_duration: Histogram,
     /// How long it took for parallel executing
     execute_duration: Histogram,
+    /// How long it took for dropping the executor
+    drop_executor_duration: Histogram,
 }
 
 static METRICS: Lazy<ParallelExecuteMetrics> = Lazy::new(ParallelExecuteMetrics::default);
@@ -229,7 +231,10 @@ where
                 error: Box::new(e.error),
             })?;
             METRICS.execute_duration.record(start_time.elapsed());
-            executor.take_result_and_state()
+            let start_time = Instant::now();
+            let res = executor.take_result_and_state();
+            METRICS.drop_executor_duration.record(start_time.elapsed());
+            res
         };
 
         self.state = Some(state);
