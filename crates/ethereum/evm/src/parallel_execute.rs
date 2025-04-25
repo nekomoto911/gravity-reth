@@ -9,6 +9,7 @@ use alloy_primitives::{
     map::{DefaultHashBuilder, HashMap},
     Address,
 };
+use once_cell::sync::Lazy;
 use reth_chainspec::{ChainSpec, EthereumHardfork, EthereumHardforks};
 use reth_consensus::ConsensusError;
 use reth_ethereum_consensus::validate_block_post_execution;
@@ -19,6 +20,10 @@ use reth_evm::{
     ConfigureEvm, Evm, ParallelDatabase,
 };
 use reth_grevm::{ParallelState, Scheduler};
+use reth_metrics::{
+    metrics::{Counter, Histogram},
+    Metrics,
+};
 use reth_primitives::{EthPrimitives, Receipt, RecoveredBlock};
 use reth_primitives_traits::SignedTransaction;
 use revm::{
@@ -26,7 +31,7 @@ use revm::{
     DatabaseCommit,
 };
 use revm_primitives::{Account, AccountStatus, EvmState};
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 /// Grevm Block execution strategy for Ethereum.
 #[allow(missing_debug_implementations)]
@@ -43,6 +48,17 @@ where
     /// Utility to call system smart contracts.
     system_caller: SystemCaller<EvmConfig, ChainSpec>,
 }
+
+#[derive(Metrics)]
+#[metrics(scope = "parallel_execute")]
+struct ParallelExecuteMetrics {
+    /// How long it took for creating grevm scheduler
+    new_scheduler_duration: Histogram,
+    /// How long it took for parallel executing
+    execute_duration: Histogram,
+}
+
+static METRICS: Lazy<ParallelExecuteMetrics> = Lazy::new(ParallelExecuteMetrics::default);
 
 impl<DB, EvmConfig> GrevmExecutionStrategy<DB, EvmConfig>
 where
@@ -204,11 +220,15 @@ where
 
             (results, parallel_state)
         } else {
+            let start_time = Instant::now();
             let executor = Scheduler::new(spec_id, env, txs, state, DEBUG_EXT.with_hints);
+            METRICS.new_scheduler_duration.record(start_time.elapsed());
+            let start_time = Instant::now();
             executor.parallel_execute(None).map_err(|e| BlockValidationError::EVM {
                 hash: block.transactions_with_sender().nth(e.txid).unwrap().1.recalculate_hash(),
                 error: Box::new(e.error),
             })?;
+            METRICS.execute_duration.record(start_time.elapsed());
             executor.take_result_and_state()
         };
 

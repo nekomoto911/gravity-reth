@@ -40,6 +40,8 @@ alloy-consensus.workspace = true
 
 # Misc
 derive_more.workspace = true
+reth-metrics.workspace = true
+metrics.workspace = true
 
 [dev-dependencies]
 reth-testing-utils.workspace = true
