@@ -8,6 +8,7 @@ use reth_trie::HashedPostState;
 use reth_trie_db::{DatabaseHashedPostState, StateCommitment};
 
 pub use reth_storage_errors::provider::ConsistentViewError;
+use tracing::warn;
 
 /// A consistent view over state in the database.
 ///
@@ -48,7 +49,11 @@ where
         Ok(Self::new(provider, tip))
     }
 
-    pub fn revert_state_with_block_number(&self, block_hash: B256, block_number: u64) -> ProviderResult<HashedPostState> {
+    pub fn revert_state_with_block_number(
+        &self,
+        block_hash: B256,
+        block_number: u64,
+    ) -> ProviderResult<HashedPostState> {
         let provider = self.provider_ro()?;
         if block_number == provider.best_block_number()? &&
             block_number == provider.last_block_number()?
@@ -105,6 +110,13 @@ where
         // To ensure this doesn't happen, we just have to make sure that we fetch from the same
         // data source that we used during initialization. In this case, that is static files
         if let Some((hash, number)) = self.tip {
+            let last_block_number = provider_ro.last_block_number()?;
+            if last_block_number != number {
+                warn!(
+                    "Inconsistent view: expected block number {}, but found last block number{}",
+                    number, last_block_number
+                );
+            }
             if provider_ro.sealed_header(number)?.is_none_or(|header| header.hash() != hash) {
                 return Err(ConsistentViewError::Reorged { block: hash }.into())
             }
