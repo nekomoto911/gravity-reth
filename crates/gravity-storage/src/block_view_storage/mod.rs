@@ -282,15 +282,30 @@ where
             let input_cache =
                 self.inner.lock().unwrap().trie_input_cache.take().and_then(|input_cache| {
                     if input_cache.base_block_number == base_block_number {
-                        assert_eq!(input_cache.last_block_number + 1, block_number);
+                        assert_eq!(input_cache.last_block_number + 2, block_number);
                         Some(input_cache.trie_input)
                     } else {
                         assert!(input_cache.base_block_number < base_block_number);
                         None
                     }
                 });
-            let mut input = if let Some(input_cache) = input_cache {
-                input_cache
+            let mut input = if let Some(mut input) = input_cache {
+                let storage = self.inner.lock().unwrap();
+                // Extend with contents of the last in-memory block
+                let trie_updates = storage
+                    .block_number_to_trie_updates
+                    .get(&(block_number - 1))
+                    .unwrap_or_else(|| panic!("Block number {} not found", block_number))
+                    .clone();
+                let hashed_state = storage
+                    .block_number_to_view
+                    .get(&(block_number - 1))
+                    .unwrap_or_else(|| panic!("Block number {} not found", block_number))
+                    .1
+                    .clone();
+                drop(storage);
+                input.append_cached_ref(trie_updates.as_ref(), hashed_state.as_ref());
+                input
             } else {
                 let mut input = TrieInput::default();
                 let (hashed_state_vec, trie_updates_vec) = {
@@ -305,13 +320,13 @@ where
                 }
                 input
             };
-            // Extend with block we are validating root for.
-            input.append_ref(hashed_state.as_ref());
             self.inner.lock().unwrap().trie_input_cache = Some(TrieInputCache {
                 trie_input: input.clone(),
                 base_block_number,
-                last_block_number: block_number,
+                last_block_number: block_number - 1,
             });
+            // Extend with block we are validating root for.
+            input.append_ref(hashed_state.as_ref());
             self.metrics.parallel_state_root_input_duration.record(start_time.elapsed());
 
             let start_time = Instant::now();
