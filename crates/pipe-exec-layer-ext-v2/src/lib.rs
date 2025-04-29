@@ -181,8 +181,10 @@ impl<Storage: GravityStorage> Core<Storage> {
             .notify(block_number, (block_without_roots.header().clone(), start_time))
             .unwrap();
 
+        let start_time = Instant::now();
         let (mut block, senders) = block_without_roots.split();
         let execution_outcome = self.calculate_roots(&mut block, execution_output);
+        self.metrics.calculate_roots_duration.record(start_time.elapsed());
 
         // Merkling the state trie
         self.merklize_barrier.wait(block_number - 1).await.unwrap();

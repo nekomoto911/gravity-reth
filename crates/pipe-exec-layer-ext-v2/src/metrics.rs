@@ -9,6 +9,9 @@ use reth_metrics::{
 pub(crate) struct PipeExecLayerMetrics {
     /// How long it took for blocks to be executed
     pub(crate) execute_duration: Histogram,
+    /// How long it took for blocks to calculate receipts root, logs bloom, and transactions root,
+    /// etc
+    pub(crate) calculate_roots_duration: Histogram,
     /// How long it took for blocks to be merklized
     pub(crate) merklize_duration: Histogram,
     /// How long it took for blocks to be sealed
