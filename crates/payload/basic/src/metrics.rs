@@ -1,6 +1,9 @@
 //! Metrics for the payload builder impl
 
-use reth_metrics::{metrics::Counter, Metrics};
+use reth_metrics::{
+    metrics::{Counter, Histogram},
+    Metrics,
+};
 
 /// Transaction pool metrics
 #[derive(Metrics)]
@@ -12,6 +15,10 @@ pub(crate) struct PayloadBuilderMetrics {
     pub(crate) initiated_payload_builds: Counter,
     /// Total number of failed payload build attempts.
     pub(crate) failed_payload_builds: Counter,
+    /// Histogram of the time it takes to execute a payload.
+    pub(crate) payload_execution_duration: Histogram,
+    /// Histogram of the time it takes to calculate merkle root for a payload.
+    pub(crate) payload_merkle_duration: Histogram,
 }
 
 impl PayloadBuilderMetrics {

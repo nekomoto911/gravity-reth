@@ -395,7 +395,13 @@ where
         if let Some(mut fut) = this.pending_block.take() {
             match fut.poll_unpin(cx) {
                 Poll::Ready(Ok(outcome)) => match outcome {
-                    BuildOutcome::Better { payload, cached_reads } => {
+                    BuildOutcome::Better { payload, cached_reads, execution_time, merkle_time } => {
+                        if let Some(execution_time) = execution_time {
+                            this.metrics.payload_execution_duration.record(execution_time);
+                        }
+                        if let Some(merkle_time) = merkle_time {
+                            this.metrics.payload_merkle_duration.record(merkle_time);
+                        }
                         this.cached_reads = Some(cached_reads);
                         debug!(target: "payload_builder", value = %payload.fees(), "built better payload");
                         this.best_payload = PayloadState::Best(payload);
@@ -687,6 +693,10 @@ pub enum BuildOutcome<Payload> {
         payload: Payload,
         /// The cached reads that were used to build the payload.
         cached_reads: CachedReads,
+        /// The time it took to execute the payload.
+        execution_time: Option<Duration>,
+        /// The time it took to compute the Merkle root.
+        merkle_time: Option<Duration>,
     },
     /// Aborted payload building because resulted in worse block wrt. fees.
     Aborted {
@@ -732,8 +742,13 @@ impl<Payload> BuildOutcome<Payload> {
         F: FnOnce(Payload) -> P,
     {
         match self {
-            Self::Better { payload, cached_reads } => {
-                BuildOutcome::Better { payload: f(payload), cached_reads }
+            Self::Better { payload, cached_reads, execution_time, merkle_time } => {
+                BuildOutcome::Better {
+                    payload: f(payload),
+                    cached_reads,
+                    execution_time,
+                    merkle_time,
+                }
             }
             Self::Aborted { fees, cached_reads } => BuildOutcome::Aborted { fees, cached_reads },
             Self::Cancelled => BuildOutcome::Cancelled,
@@ -765,7 +780,12 @@ impl<Payload> BuildOutcomeKind<Payload> {
     /// Attaches the [`CachedReads`] to the outcome.
     pub fn with_cached_reads(self, cached_reads: CachedReads) -> BuildOutcome<Payload> {
         match self {
-            Self::Better { payload } => BuildOutcome::Better { payload, cached_reads },
+            Self::Better { payload } => BuildOutcome::Better {
+                payload,
+                cached_reads,
+                execution_time: None,
+                merkle_time: None,
+            },
             Self::Aborted { fees } => BuildOutcome::Aborted { fees, cached_reads },
             Self::Cancelled => BuildOutcome::Cancelled,
             Self::Freeze(payload) => BuildOutcome::Freeze(payload),

@@ -175,6 +175,7 @@ where
     Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TransactionSigned>>,
     F: FnOnce(BestTransactionsAttributes) -> BestTransactionsIter<Pool>,
 {
+    let start_time = std::time::Instant::now();
     let BuildArguments { mut cached_reads, config, cancel, best_payload } = args;
 
     let chain_spec = client.chain_spec();
@@ -391,11 +392,13 @@ where
         block_number,
         vec![requests.clone().unwrap_or_default()],
     );
+    let execution_time = start_time.elapsed();
     let receipts_root =
         execution_outcome.ethereum_receipts_root(block_number).expect("Number is in range");
     let logs_bloom = execution_outcome.block_logs_bloom(block_number).expect("Number is in range");
 
     // calculate the state root
+    let start_time = std::time::Instant::now();
     let hashed_state = db.database.db.hashed_post_state(execution_outcome.state());
     let (state_root, _) = {
         db.database.inner().state_root_with_updates(hashed_state).inspect_err(|err| {
@@ -406,6 +409,7 @@ where
             );
         })?
     };
+    let merkle_time = start_time.elapsed();
 
     // create the block header
     let transactions_root = proofs::calculate_transaction_root(&executed_txs);
@@ -477,5 +481,5 @@ where
     // extend the payload with the blob sidecars from the executed txs
     payload.extend_sidecars(blob_sidecars.into_iter().map(Arc::unwrap_or_clone));
 
-    Ok(BuildOutcome::Better { payload, cached_reads })
+    Ok(BuildOutcome::Better { payload, cached_reads, execution_time: Some(execution_time), merkle_time: Some(merkle_time) })
 }
