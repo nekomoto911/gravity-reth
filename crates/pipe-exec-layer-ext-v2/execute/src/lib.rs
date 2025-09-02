@@ -563,7 +563,7 @@ impl<Storage: GravityStorage> Core<Storage> {
             let (metadata_txn_result, state_changes) = transact_metadata_contract_call(
                 &mut evm,
                 ordered_block.timestamp * 1_000_000,
-                ordered_block.proposer,
+                None,
             );
             drop(evm);
 
