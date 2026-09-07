@@ -40,32 +40,32 @@ pub struct MigrationRow {
 
 /// Hardcoded Longevity Testnet migration table (node1 → node2 → node3 → node5).
 ///
-/// New owner addresses come from the Phase 0 ceremony
-/// (`new-owners.addresses.yaml`); private keys never enter this binary.
+/// `new_owner` MUST be `cast wallet address --private-key <ceremony PK>` for
+/// each node. Private keys never enter this binary.
 pub const MIGRATION_TABLE: [MigrationRow; 4] = [
     MigrationRow {
         label: "node1",
         stake_pool: address!("743d93845745e01a23f9afbb990bbc7c87aae6c8"),
         old_owner: address!("CE128222Bd84D67672f863424a03D114CD1253C5"),
-        new_owner: address!("c7536c625758b3072c43eab8e8880c1ae8cb4cf9"),
+        new_owner: address!("91a59bae639a3cef0c41e4c61268aa54c71de1ba"),
     },
     MigrationRow {
         label: "node2",
         stake_pool: address!("419ad62f796a0f3971bd1212f208942c3c435b99"),
         old_owner: address!("78F595Fb25D03a742338Fb32AcfD544BdC63D814"),
-        new_owner: address!("f0de80e6df293be1b81d106afd5ae5430079e9d2"),
+        new_owner: address!("6a0da8def2ccd134119c0293ad470d1aa1d6129a"),
     },
     MigrationRow {
         label: "node3",
         stake_pool: address!("93e5acbcdd50767f7fd19ab4a2efc259d9a8bdd1"),
         old_owner: address!("891299fE364088ead65ABa911ea17DD5d968Cd81"),
-        new_owner: address!("2c26bab4ebcc88fb0ad580652938a27e692037f0"),
+        new_owner: address!("5a1ba49d261e1e58dd1b8cf0aeeb1976d04ac6bd"),
     },
     MigrationRow {
         label: "node5",
         stake_pool: address!("298136ce84d442d2c0c594f5734a20afc60de244"),
         old_owner: address!("B99AA922Eb5CaE399b79ADC87621E72f66d5A976"),
-        new_owner: address!("3e1b5fab188ddc208c547dd689b0f6b4864b4127"),
+        new_owner: address!("2326795e2033d209ea12b1022c50ae592ac2b720"),
     },
 ];
 
