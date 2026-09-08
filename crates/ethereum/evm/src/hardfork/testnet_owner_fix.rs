@@ -14,7 +14,7 @@
 //! The txs are written into the block body with `TransactionSenders = old_owner`.
 //!
 //! V2 exists because Longevity already consumed the v1 one-shot with a wrong
-//! (CLI compressed-pubkey) `new_owner` table; Ownable2Step lets a later
+//! (CLI compressed-pubkey) `new_owner` table; `Ownable2Step` lets a later
 //! `transferOwnership` from the same `old_owner` overwrite `pendingOwner`.
 //!
 //! This module owns the hardcoded migration table and calldata encoding.

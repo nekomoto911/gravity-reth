@@ -1,4 +1,4 @@
-//! Pipe-layer injection for TestnetOwnerFix / TestnetOwnerFixV2.
+//! Pipe-layer injection for `TestnetOwnerFix` / `TestnetOwnerFixV2`.
 //!
 //! Runs after metadata/DKG/JWK system txs and before user txs. Constructs four
 //! forced `transferOwnership` calls with `from = old_owner`, executes them via

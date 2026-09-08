@@ -57,7 +57,7 @@ hardfork!(
     }
 );
 
-/// Longevity Testnet chain id. Gates TestnetOwnerFix / TestnetOwnerFixV2.
+/// Longevity Testnet chain id. Gates `TestnetOwnerFix` / `TestnetOwnerFixV2`.
 pub const LONGEVITY_TESTNET_CHAIN_ID: u64 = 7_771_625;
 
 /// Canonical sender address of every Gravity protocol-injected system transaction
