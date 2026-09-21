@@ -316,7 +316,9 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
                     return Ok(None);
                 };
 
-                let tx = tx.try_into_recovered_unchecked().map_err(Self::Error::from_eth_err)?;
+                // Committed Gravity system transactions have no recoverable signature.
+                let signer = tx.recover_signer_unchecked().unwrap_or(SYSTEM_CALLER);
+                let tx = Recovered::new_unchecked(tx, signer);
 
                 let receipt = provider.receipt_by_hash(hash).map_err(Self::Error::from_eth_err)?;
 

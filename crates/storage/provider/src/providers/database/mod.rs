@@ -792,6 +792,83 @@ mod tests {
     }
 
     #[test]
+    fn gravity_system_senders_after_pruning() {
+        use crate::{BlockReader, StaticFileProviderFactory, TransactionVariant};
+        use alloy_consensus::TxLegacy;
+        use alloy_primitives::{Address, Signature};
+        use reth_chainspec::SYSTEM_CALLER;
+        use reth_db_api::transaction::DbTxMut;
+        use reth_ethereum_primitives::{Transaction, TransactionSigned};
+        use reth_primitives_traits::RecoveredBlock;
+
+        let mut block = TEST_BLOCK.clone().into_block();
+        block.header.number = 0;
+        let user_tx = block.body.transactions[0].clone();
+        let user_sender = user_tx.recover_signer_unchecked().unwrap();
+        let system_tx = TransactionSigned::new_unhashed(
+            Transaction::Legacy(TxLegacy::default()),
+            Signature::new(U256::ZERO, U256::ZERO, false),
+        );
+        assert!(system_tx.recover_signer_unchecked().is_err());
+        block.body.transactions = vec![system_tx.clone(), user_tx, system_tx];
+
+        for (location, retained) in [
+            (StorageLocation::Database, false),
+            (StorageLocation::Database, true),
+            (StorageLocation::StaticFiles, false),
+            (StorageLocation::StaticFiles, true),
+        ] {
+            let factory = create_test_provider_factory().with_prune_modes(PruneModes {
+                sender_recovery: Some(PruneMode::Full),
+                ..PruneModes::none()
+            });
+            let provider = factory.provider_rw().unwrap();
+            let mut expected = vec![SYSTEM_CALLER, user_sender, SYSTEM_CALLER];
+            provider
+                .insert_block(
+                    RecoveredBlock::new_unhashed(block.clone(), expected.clone()),
+                    location,
+                )
+                .unwrap();
+            provider.commit_view().unwrap();
+            provider.static_file_provider().commit().unwrap();
+            assert!(provider.senders_by_tx_range(0..3).unwrap().is_empty());
+            if location.static_files() {
+                let static_files = provider.static_file_provider();
+                let jar = static_files
+                    .get_segment_provider_from_transaction(StaticFileSegment::Transactions, 0, None)
+                    .unwrap();
+                assert_eq!(static_files.senders_by_tx_range(0..3).unwrap(), expected);
+                assert_eq!(jar.senders_by_tx_range(0..3).unwrap(), expected);
+                for (id, sender) in expected.iter().enumerate() {
+                    assert_eq!(static_files.transaction_sender(id as u64).unwrap(), Some(*sender));
+                    assert_eq!(jar.transaction_sender(id as u64).unwrap(), Some(*sender));
+                }
+                assert_eq!(static_files.transaction_sender(3).unwrap(), None);
+                assert_eq!(jar.transaction_sender(3).unwrap(), None);
+            }
+            if retained {
+                // A retained entry in the middle must remain aligned with its transaction ID.
+                expected[1] = Address::repeat_byte(0x42);
+                provider.tx_ref().put::<tables::TransactionSenders>(1, expected[1]).unwrap();
+                provider.commit_view().unwrap();
+            }
+            let by_number =
+                provider.recovered_block(0.into(), TransactionVariant::WithHash).unwrap().unwrap();
+            let by_hash = provider
+                .sealed_block_with_senders(by_number.hash().into(), TransactionVariant::WithHash)
+                .unwrap()
+                .unwrap();
+            let range = provider.block_with_senders_range(0..=0).unwrap();
+            let sealed_range = provider.recovered_block_range(0..=0).unwrap();
+            for recovered in [&by_number, &by_hash, &range[0], &sealed_range[0]] {
+                assert_eq!(recovered.senders(), expected);
+                assert_eq!(recovered.body().transactions, block.body.transactions);
+            }
+        }
+    }
+
+    #[test]
     fn take_block_transaction_range_recover_senders() {
         let factory = create_test_provider_factory();
 

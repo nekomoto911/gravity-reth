@@ -17,7 +17,7 @@ use reth_chain_state::{
 use reth_errors::{ProviderError, ProviderResult};
 use reth_ethereum_primitives::{Block, BlockBody, EthPrimitives};
 use reth_evm::{execute::Executor, ConfigureEvm};
-use reth_primitives_traits::{Block as _, Header, RecoveredBlock};
+use reth_primitives_traits::{Header, RecoveredBlock};
 use reth_ress_protocol::RessProtocolProvider;
 use reth_revm::{database::StateProviderDatabase, db::State, witness::ExecutionWitnessRecord};
 use reth_tasks::Runtime;
@@ -32,7 +32,7 @@ use recorder::StateWitnessRecorderDatabase;
 
 mod pending_state;
 pub use pending_state::*;
-use reth_storage_api::{BlockReader, BlockSource, StateProviderFactory};
+use reth_storage_api::{BlockReader, StateProviderFactory, TransactionVariant};
 
 /// Reth provider implementing [`RessProtocolProvider`].
 #[expect(missing_debug_implementations)]
@@ -82,11 +82,15 @@ where
         // to access non-canonical or invalid blocks via the provider.
         let maybe_block = if let Some(block) = self.pending_state.recovered_block(&block_hash) {
             Some(block)
-        } else if let Some(block) =
-            self.provider.find_block_by_hash(block_hash, BlockSource::Any)?
+        } else if let Some(block) = self
+            .provider
+            .sealed_block_with_senders(block_hash.into(), TransactionVariant::WithHash)?
         {
-            let signers = block.recover_signers()?;
-            Some(Arc::new(block.into_recovered_with_signers(signers)))
+            Some(Arc::new(block))
+        } else if let Some(block) =
+            self.provider.pending_block()?.filter(|block| block.hash() == block_hash)
+        {
+            Some(Arc::new(block))
         } else {
             // we attempt to look up invalid block last
             self.pending_state.invalid_recovered_block(&block_hash)

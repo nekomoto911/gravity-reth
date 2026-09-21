@@ -32,7 +32,9 @@ use alloy_primitives::{
 use itertools::Itertools;
 use parking_lot::RwLock;
 use rayon::{prelude::*, slice::ParallelSliceMut};
-use reth_chainspec::{ChainInfo, ChainSpecProvider, EthChainSpec, EthereumHardforks};
+use reth_chainspec::{
+    ChainInfo, ChainSpecProvider, EthChainSpec, EthereumHardforks, SYSTEM_CALLER,
+};
 use reth_db_api::{
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW},
     database::Database,
@@ -652,7 +654,10 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
         let (transactions, senders) = if tx_range.is_empty() {
             (vec![], vec![])
         } else {
-            (self.transactions_by_tx_range(tx_range.clone())?, self.senders_by_tx_range(tx_range)?)
+            let transactions = self.transactions_by_tx_range(tx_range.clone())?;
+            let mut cursor = self.tx.cursor_read::<tables::TransactionSenders>()?;
+            let senders = Self::recover_stored_senders(&mut cursor, tx_range, &transactions)?;
+            (transactions, senders)
         };
 
         let body = self
@@ -663,6 +668,28 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
             .ok_or(ProviderError::InvalidStorageOutput)?;
 
         construct_block(header, body, senders)
+    }
+
+    /// Preserve stored senders and reconstruct pruned entries from committed transactions.
+    fn recover_stored_senders(
+        cursor: &mut impl DbCursorRO<tables::TransactionSenders>,
+        tx_range: Range<TxNumber>,
+        transactions: &[TxTy<N>],
+    ) -> ProviderResult<Vec<Address>> {
+        if tx_range.is_empty() {
+            return Ok(Vec::new())
+        }
+        let known_senders =
+            cursor.walk_range(tx_range.clone())?.collect::<Result<HashMap<_, _>, _>>()?;
+        Ok(tx_range
+            .zip(transactions)
+            .map(|(tx_num, tx)| {
+                known_senders.get(&tx_num).copied().unwrap_or_else(|| {
+                    // Committed Gravity system transactions have no recoverable signature.
+                    tx.recover_signer_unchecked().unwrap_or(SYSTEM_CALLER)
+                })
+            })
+            .collect())
     }
 
     /// Returns a range of blocks from the database.
@@ -751,29 +778,8 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
         let mut senders_cursor = self.tx.cursor_read::<tables::TransactionSenders>()?;
 
         self.block_range(range, headers_range, |header, body, tx_range| {
-            let senders = if tx_range.is_empty() {
-                Vec::new()
-            } else {
-                // fetch senders from the senders table
-                let known_senders =
-                    senders_cursor
-                        .walk_range(tx_range.clone())?
-                        .collect::<Result<HashMap<_, _>, _>>()?;
-
-                let mut senders = Vec::with_capacity(body.transactions().len());
-                for (tx_num, tx) in tx_range.zip(body.transactions()) {
-                    match known_senders.get(&tx_num) {
-                        None => {
-                            // recover the sender from the transaction if not found
-                            let sender = tx.recover_signer_unchecked()?;
-                            senders.push(sender);
-                        }
-                        Some(sender) => senders.push(*sender),
-                    }
-                }
-
-                senders
-            };
+            let senders =
+                Self::recover_stored_senders(&mut senders_cursor, tx_range, body.transactions())?;
 
             assemble_block(header, body, senders)
         })

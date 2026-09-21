@@ -20,7 +20,7 @@ use dashmap::DashMap;
 use gravity_primitives::get_gravity_config;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::RwLock;
-use reth_chainspec::{ChainInfo, ChainSpecProvider, EthChainSpec, NamedChain};
+use reth_chainspec::{ChainInfo, ChainSpecProvider, EthChainSpec, NamedChain, SYSTEM_CALLER};
 use reth_db::{
     lockfile::StorageLock,
     static_file::{
@@ -1882,12 +1882,13 @@ impl<N: NodePrimitives<SignedTx: Decompress + SignedTransaction>> TransactionsPr
         range: impl RangeBounds<TxNumber>,
     ) -> ProviderResult<Vec<Address>> {
         let txes = self.transactions_by_tx_range(range)?;
-        Ok(reth_primitives_traits::transaction::recover::recover_signers(&txes)?)
+        // Stored Gravity system transactions have no recoverable signature.
+        Ok(txes.iter().map(|tx| tx.recover_signer_unchecked().unwrap_or(SYSTEM_CALLER)).collect())
     }
 
     fn transaction_sender(&self, id: TxNumber) -> ProviderResult<Option<Address>> {
         match self.transaction_by_id_unhashed(id)? {
-            Some(tx) => Ok(tx.recover_signer().ok()),
+            Some(tx) => Ok(Some(tx.recover_signer_unchecked().unwrap_or(SYSTEM_CALLER))),
             None => Ok(None),
         }
     }

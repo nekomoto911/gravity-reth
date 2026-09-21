@@ -9,7 +9,7 @@ use crate::{
 use alloy_consensus::transaction::{SignerRecoverable, TransactionMeta};
 use alloy_eips::{eip2718::Encodable2718, BlockHashOrNumber};
 use alloy_primitives::{Address, BlockHash, BlockNumber, TxHash, TxNumber, B256, U256};
-use reth_chainspec::ChainInfo;
+use reth_chainspec::{ChainInfo, SYSTEM_CALLER};
 use reth_db::static_file::{
     BlockHashMask, HeaderMask, HeaderWithHashMask, ReceiptMask, StaticFileCursor, TDWithHashMask,
     TotalDifficultyMask, TransactionMask,
@@ -344,14 +344,15 @@ impl<N: NodePrimitives<SignedTx: Decompress + SignedTransaction>> TransactionsPr
         range: impl RangeBounds<TxNumber>,
     ) -> ProviderResult<Vec<Address>> {
         let txs = self.transactions_by_tx_range(range)?;
-        Ok(reth_primitives_traits::transaction::recover::recover_signers(&txs)?)
+        // Stored Gravity system transactions have no recoverable signature.
+        Ok(txs.iter().map(|tx| tx.recover_signer_unchecked().unwrap_or(SYSTEM_CALLER)).collect())
     }
 
     fn transaction_sender(&self, num: TxNumber) -> ProviderResult<Option<Address>> {
         Ok(self
             .cursor()?
             .get_one::<TransactionMask<Self::Transaction>>(num.into())?
-            .and_then(|tx| tx.recover_signer().ok()))
+            .map(|tx| tx.recover_signer_unchecked().unwrap_or(SYSTEM_CALLER)))
     }
 }
 
