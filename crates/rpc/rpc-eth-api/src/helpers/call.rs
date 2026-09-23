@@ -3,7 +3,13 @@
 
 use core::fmt;
 
-use super::{LoadBlock, LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace};
+use super::{
+    pre_alpha_epoch_block::{
+        active_validator_index, is_pre_alpha_dkg_epoch_block, on_block_start_txn,
+        written_timestamp_micros,
+    },
+    LoadBlock, LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace,
+};
 use crate::{
     helpers::estimate::EstimateCall, FromEvmError, FullEthApiTypes, RpcBlock, RpcNodeCore,
 };
@@ -17,10 +23,14 @@ use alloy_rpc_types_eth::{
     state::{EvmOverrides, StateOverride},
     BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
+use alloy_sol_types::SolCall;
 use futures::Future;
 use reth_chainspec::{
+    gravity_system_contracts::{
+        getActiveValidatorsCall, NIL_PROPOSER_INDEX, VALIDATOR_MANAGER_ADDR,
+    },
     is_gravity_system_caller, is_system_tx_gas_exempt, ChainSpecProvider, EthChainSpec,
-    EthereumHardforks,
+    EthereumHardforks, SYSTEM_CALLER,
 };
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
@@ -29,7 +39,7 @@ use reth_evm::{
     TransactionEnvMut, TxEnvFor,
 };
 use reth_node_api::BlockBody;
-use reth_primitives_traits::Recovered;
+use reth_primitives_traits::{Recovered, RecoveredBlock};
 use reth_revm::{
     cancelled::CancelOnDrop,
     database::StateProviderDatabase,
@@ -42,7 +52,7 @@ use reth_rpc_eth_types::{
     simulate::{self, EthSimulateError},
     EthApiError, StateCacheDb,
 };
-use reth_storage_api::{BlockIdReader, ProviderTx, StateProviderBox};
+use reth_storage_api::{BlockIdReader, ProviderBlock, ProviderTx, StateProviderBox};
 use revm::{
     context::Block,
     context_interface::{result::ResultAndState, Transaction},
@@ -366,11 +376,11 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 let mut all_results = Vec::with_capacity(bundles.len());
 
                 if replay_block_txs {
+                    this.apply_pre_execution_changes(&block, &mut db)?;
                     let mut executor = RpcNodeCore::evm_config(&this)
                         .executor_for_block(&mut db, block.sealed_block())
                         .map_err(RethError::other)
                         .map_err(Self::Error::from_eth_err)?;
-                    executor.apply_pre_execution_changes().map_err(Self::Error::from_eth_err)?;
                     for tx in block.transactions_recovered().take(num_txs) {
                         executor.execute_transaction(tx).map_err(Self::Error::from_eth_err)?;
                     }
@@ -794,11 +804,11 @@ pub trait Call:
             self.spawn_with_state_at_block(parent_block, move |this, mut db| {
                 let block_txs = block.transactions_recovered();
 
+                this.apply_pre_execution_changes(&block, &mut db)?;
                 let mut executor = RpcNodeCore::evm_config(&this)
                     .executor_for_block(&mut db, block.sealed_block())
                     .map_err(RethError::other)
                     .map_err(Self::Error::from_eth_err)?;
-                executor.apply_pre_execution_changes().map_err(Self::Error::from_eth_err)?;
 
                 // replay all transactions prior to the targeted transaction
                 for block_tx in block_txs {
@@ -817,6 +827,79 @@ pub trait Call:
             .await
             .map(Some)
         }
+    }
+
+    /// Applies the state changes that canonical execution made before the block's first body
+    /// transaction, on top of the parent state in `db`.
+    ///
+    /// These are normally the EIP-2935 / EIP-4788 system calls. A pre-Alpha DKG epoch-change
+    /// block (see [`is_pre_alpha_dkg_epoch_block`]) instead gets the `onBlockStart` metadata
+    /// transaction its body omits; the pipe skipped the system calls for such blocks. The replayed
+    /// `onBlockStart` has no receipt and takes no transaction index.
+    ///
+    /// Note: This should only be called when replaying a block from its start. When tracing
+    /// transactions on top of an already committed block state, those transitions are already
+    /// applied.
+    fn apply_pre_execution_changes(
+        &self,
+        block: &RecoveredBlock<ProviderBlock<Self::Provider>>,
+        db: &mut StateCacheDb,
+    ) -> Result<(), Self::Error> {
+        if !is_pre_alpha_dkg_epoch_block(self.provider().chain_spec().as_ref(), block) {
+            self.evm_config()
+                .executor_for_block(db, block.sealed_block())
+                .map_err(RethError::other)
+                .map_err(Self::Error::from_eth_err)?
+                .apply_pre_execution_changes()
+                .map_err(Self::Error::from_eth_err)?;
+            return Ok(())
+        }
+
+        let evm_env = self.evm_env_for_header(block.sealed_block().sealed_header())?;
+
+        // Step 1: rebuild the `onBlockStart` arguments from chain state.
+        let beneficiary = block.header().beneficiary();
+        let proposer_index = if beneficiary.is_zero() {
+            // gravity-sdk leaves the beneficiary zero for a NIL block.
+            NIL_PROPOSER_INDEX
+        } else {
+            // The active set only changes in `finishTransition`, so the parent state in `db`
+            // still maps the proposer index to the beneficiary. The view call is not committed.
+            let active_validators = self
+                .evm_config()
+                .evm_with_env(&mut *db, evm_env.clone())
+                .transact_system_call(
+                    SYSTEM_CALLER,
+                    VALIDATOR_MANAGER_ADDR,
+                    getActiveValidatorsCall {}.abi_encode().into(),
+                )
+                .map_err(Self::Error::from_evm_err)?
+                .result;
+            active_validator_index(beneficiary, &active_validators)
+                .map_err(Self::Error::from_eth_err)?
+        };
+        let post_block_state = self.state_at_hash(block.hash())?;
+        let timestamp_micros =
+            written_timestamp_micros(&post_block_state).map_err(Self::Error::from_eth_err)?;
+
+        // Step 2: execute it the way the pipe did, taking the nonce right before the body's
+        // `finishTransition`, and commit it.
+        let nonce = db
+            .basic(SYSTEM_CALLER)
+            .map_err(Self::Error::from_eth_err)?
+            .map(|account| account.nonce)
+            .unwrap_or_default();
+        let tx: ProviderTx<Self::Provider> = on_block_start_txn(
+            nonce,
+            evm_env.block_env.basefee(),
+            proposer_index,
+            timestamp_micros,
+        )
+        .map_err(Self::Error::from_eth_err)?;
+        let tx_env = self.evm_config().tx_env(Recovered::new_unchecked(&tx, SYSTEM_CALLER));
+        let res = self.transact(&mut *db, evm_env, tx_env)?;
+        db.commit(res.state);
+        Ok(())
     }
 
     /// Replays all the transactions until the target transaction is found.

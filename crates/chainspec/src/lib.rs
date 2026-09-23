@@ -18,6 +18,7 @@ pub use constants::*;
 mod api;
 /// Gravity-specific hardforks module.
 mod gravity;
+pub mod gravity_system_contracts;
 /// The chain info module.
 mod info;
 /// The chain spec module.
