@@ -865,6 +865,7 @@ pub trait Call:
         db: &mut StateCacheDb,
     ) -> Result<(), Self::Error> {
         if !is_pre_alpha_dkg_epoch_block(self.provider().chain_spec().as_ref(), block) {
+            // gravity-invariant: no-block-tx (runs only the EIP-2935 / EIP-4788 system calls)
             self.evm_config()
                 .executor_for_block(db, block.sealed_block())
                 .map_err(RethError::other)
@@ -884,9 +885,14 @@ pub trait Call:
         } else {
             // The active set only changes in `finishTransition`, so the parent state in `db`
             // still maps the proposer index to the beneficiary. The view call is not committed.
-            let active_validators = self
-                .evm_config()
-                .evm_with_env(&mut *db, evm_env.clone())
+            let mut evm = self.evm_config().evm_with_env(&mut *db, evm_env.clone());
+            self.register_custom_precompiles(
+                &mut evm,
+                evm_env.block_env.number(),
+                evm_env.block_env.timestamp(),
+                evm_env.block_env.prevrandao(),
+            );
+            let active_validators = evm
                 .transact_system_call(
                     SYSTEM_CALLER,
                     VALIDATOR_MANAGER_ADDR,

@@ -12,7 +12,7 @@
 # shell script keeps the assertion text usable as both a hard check AND a
 # paste-able reproduction recipe.
 #
-# Invariants (8 total):
+# Invariants (10 total):
 #   1. `fn transact_system_txn` lives in exactly two source files
 #      (serial impl + grevm impl).
 #   2. SYSTEM_CALLER address literal `625f0000` has a single source of
@@ -45,6 +45,11 @@
 #      Without invariant 9, a newly added test file is silently skipped by
 #      CI (as happened with the six #367 / #370 files) — assertions may
 #      pass locally but never gate a merge.
+#  10. (#441) Every EVM or block executor built under `crates/rpc` registers
+#      the Gravity precompiles (`register_custom_precompiles` within 12
+#      lines), and every file that replays block txs through
+#      `executor_for_block` applies `set_system_tx_gas_exemption`. EVMs that
+#      only run system calls carry the marker `gravity-invariant: no-block-tx`.
 #
 # Invocation:
 #   bash scripts/check-gravity-invariants.sh
@@ -329,6 +334,62 @@ ${stale}" \
         "ls $tests_dir/"
 fi
 ok 9 "CI --test allowlist + KNOWN_UNWIRED_TESTS jointly cover all gravity_system_tx_* / gravity_bls_* integration tests"
+
+# ---------------------------------------------------------------------------
+# Invariant 10 (#441) — RPC EVM / executor constructions carry the Gravity
+# replay rules. Upstream merges bring new replay paths without them; this is
+# the net that catches those.
+#   10a: every `evm_with_env(` / `evm_with_env_and_inspector(` /
+#        `create_evm_with_inspector(` / `executor_for_block(` call under
+#        crates/rpc is followed by `register_custom_precompiles` within 12
+#        lines, unless one of the 3 lines above carries the marker (the EVM
+#        only runs system calls and never a block tx).
+#   10b: every file with an unmarked `executor_for_block(` call references
+#        `set_system_tx_gas_exemption`.
+# `rpc-eth-api/src/helpers/bal.rs` is skipped: it is not in the module tree.
+# ---------------------------------------------------------------------------
+echo "Invariant 10 (#441): RPC EVM/executor constructions register precompiles and apply the system-tx gas exemption"
+construct_re='\b(evm_with_env|evm_with_env_and_inspector|create_evm_with_inspector|executor_for_block)\('
+no_block_tx_marker='gravity-invariant: no-block-tx'
+# Exit 0 when lines $2..$3 of file $1 contain the fixed string $4. One awk
+# process, no pipe: `sed | grep -q` under `pipefail` can report SIGPIPE.
+range_contains() {
+    awk -v from="$2" -v to="$3" -v needle="$4" \
+        'NR >= from && NR <= to && index($0, needle) { found = 1 } END { exit !found }' "$1"
+}
+unhooked=""
+executor_files=""
+while IFS=: read -r file line _; do
+    if [ "$file" = "crates/rpc/rpc-eth-api/src/helpers/bal.rs" ]; then continue; fi
+    start=$(( line > 3 ? line - 3 : 1 ))
+    if range_contains "$file" "$start" "$line" "$no_block_tx_marker"; then continue; fi
+    if ! range_contains "$file" "$line" "$(( line + 12 ))" 'register_custom_precompiles'; then
+        unhooked="${unhooked}${file}:${line}
+"
+    fi
+    if range_contains "$file" "$line" "$line" 'executor_for_block('; then
+        executor_files="${executor_files}${file}
+"
+    fi
+done < <(rg --type rust -n "$construct_re" crates/rpc)
+if [ -n "$unhooked" ]; then
+    fail 10 "EVM / executor built under crates/rpc without register_custom_precompiles in the next 12 lines. Register the precompiles, or mark an EVM that only runs system calls with '$no_block_tx_marker'. Unhooked sites:
+${unhooked}" \
+        "rg --type rust -n -A12 '$construct_re' crates/rpc"
+fi
+missing_exemption=""
+for f in $(printf '%s' "$executor_files" | sort -u); do
+    if ! rg -q 'set_system_tx_gas_exemption' "$f"; then
+        missing_exemption="${missing_exemption}${f}
+"
+    fi
+done
+if [ -n "$missing_exemption" ]; then
+    fail 10 "file replays block txs through executor_for_block but never calls set_system_tx_gas_exemption. Files:
+${missing_exemption}" \
+        "rg --type rust -n 'executor_for_block|set_system_tx_gas_exemption' crates/rpc"
+fi
+ok 10 "RPC EVM/executor constructions register precompiles and apply the system-tx gas exemption"
 
 echo
 echo "All Gravity invariants passed."
