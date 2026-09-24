@@ -65,7 +65,8 @@ use alloy_rpc_types_eth::{
     Bundle, Index, StateContext, TransactionIndex, TransactionInput, TransactionRequest,
 };
 use alloy_rpc_types_trace::geth::{
-    call::CallConfig, CallFrame, GethDebugTracingOptions, GethTrace, TraceResult,
+    call::CallConfig, CallFrame, GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace,
+    TraceResult,
 };
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
@@ -874,6 +875,48 @@ async fn run_bls_replay(
                     );
                 }
             }
+
+            // (4) debug_intermediateRoots: one EVM per tx, each needs both rules.
+            let roots = debug_api
+                .intermediate_roots(block.hash())
+                .await
+                .unwrap_or_else(|e| panic!("[{label}] debug_intermediateRoots errored: {e:?}"));
+            assert_eq!(roots.len(), tx_hashes.len(), "[{label}] one root per tx");
+            assert_eq!(
+                roots.last(),
+                Some(&header.state_root()),
+                "[{label}] replayed state must match the header"
+            );
+
+            // (5) debug_traceCallMany right before the transfer, same prefix as eth_callMany.
+            let call_opts = GethDebugTracingCallOptions {
+                // Moved, not cloned: this arm is the last user of `tracing_opts`
+                // (workspace clippy has `redundant_clone = "warn"`).
+                tracing_options: tracing_opts,
+                state_overrides: Some(balance_probe_override(sender_addr)),
+                ..Default::default()
+            };
+            let traced = debug_api
+                .debug_trace_call_many(probe_bundle(), before_transfer, Some(call_opts))
+                .await
+                .unwrap_or_else(|e| panic!("[{label}] debug_traceCallMany errored: {e:?}"));
+            let outputs: Vec<Bytes> = traced[0]
+                .iter()
+                .map(|trace| match trace {
+                    GethTrace::CallTracer(frame) => frame.output.clone().expect("call output"),
+                    other => panic!("[{label}] expected callTracer output, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(
+                U256::from_be_slice(&outputs[0]),
+                sender_balance,
+                "[{label}] debug_traceCallMany replayed the BLS call"
+            );
+            assert_eq!(
+                nowMicrosecondsCall::abi_decode_returns(&outputs[1]).unwrap(),
+                ts_us(BLS_BLOCK_NUMBER),
+                "[{label}] debug_traceCallMany replayed onBlockStart"
+            );
         }
     }
 

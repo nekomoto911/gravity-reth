@@ -477,13 +477,19 @@ where
                     // to be replayed
                     eth_api.apply_pre_execution_changes(&block, &mut db)?;
 
-                    let transactions = block.transactions_recovered().take(num_txs);
-
-                    // Execute all transactions until index
-                    for tx in transactions {
+                    // Execute all transactions until index on one EVM, applying the Gravity
+                    // replay rules per tx; the EVM (and its borrow of `db`) ends with this block.
+                    let mut evm = eth_api.evm_config().evm_with_env(&mut db, evm_env.clone());
+                    eth_api.register_custom_precompiles(
+                        &mut evm,
+                        evm_env.block_env.number(),
+                        evm_env.block_env.timestamp(),
+                        evm_env.block_env.prevrandao(),
+                    );
+                    for tx in block.transactions_recovered().take(num_txs) {
+                        eth_api.evm_config().set_system_tx_gas_exemption(&mut evm, tx.signer());
                         let tx_env = eth_api.evm_config().tx_env(tx);
-                        let res = eth_api.transact(&mut db, evm_env.clone(), tx_env)?;
-                        db.commit(res.state);
+                        evm.transact_commit(tx_env).map_err(Eth::Error::from_evm_err)?;
                     }
                 }
 
@@ -813,9 +819,17 @@ where
 
                 let mut roots = Vec::with_capacity(block.body().transactions().len());
                 for tx in block.transactions_recovered() {
+                    let sender = tx.signer();
                     let tx_env = eth_api.evm_config().tx_env(tx);
                     {
                         let mut evm = eth_api.evm_config().evm_with_env(&mut db, evm_env.clone());
+                        eth_api.register_custom_precompiles(
+                            &mut evm,
+                            evm_env.block_env.number(),
+                            evm_env.block_env.timestamp(),
+                            evm_env.block_env.prevrandao(),
+                        );
+                        eth_api.evm_config().set_system_tx_gas_exemption(&mut evm, sender);
                         evm.transact_commit(tx_env).map_err(Eth::Error::from_evm_err)?;
                     }
                     // Merge transitions into cumulative bundle_state
