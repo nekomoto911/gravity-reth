@@ -342,7 +342,8 @@ where
         evm: &mut EvmFor<Self, DB, I>,
         sender: Address,
     ) {
-        // Same predicate as `transact_system_txn`, keyed on the block the EVM executes.
+        // Mirrors the Alpha gate in `transact_system_txn`, keyed on the block the EVM executes;
+        // the sender check stands in for that path's "only system txs come here" contract.
         let block_ts: u64 = evm.block().timestamp.saturating_to();
         let exempt = is_gravity_system_caller(sender) &&
             is_system_tx_gas_exempt(self.chain_spec().as_ref(), block_ts);

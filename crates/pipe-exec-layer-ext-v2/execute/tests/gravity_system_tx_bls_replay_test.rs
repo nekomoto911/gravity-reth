@@ -890,8 +890,6 @@ async fn run_bls_replay(
 
             // (5) debug_traceCallMany right before the transfer, same prefix as eth_callMany.
             let call_opts = GethDebugTracingCallOptions {
-                // Moved, not cloned: this arm is the last user of `tracing_opts`
-                // (workspace clippy has `redundant_clone = "warn"`).
                 tracing_options: tracing_opts,
                 state_overrides: Some(balance_probe_override(sender_addr)),
                 ..Default::default()
@@ -921,7 +919,7 @@ async fn run_bls_replay(
     }
 
     println!(
-        "[bls_replay {label}] ✅ BLS RPC replay byte-equal canonical (gas={canonical_bls_gas}, success={canonical_bls_success})"
+        "[bls_replay {label}] ✅ BLS RPC replay matches canonical (gas={canonical_bls_gas}, success={canonical_bls_success})"
     );
     Ok(())
 }

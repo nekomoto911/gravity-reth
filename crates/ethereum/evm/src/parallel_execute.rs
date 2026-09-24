@@ -1261,13 +1261,13 @@ mod tests {
         assert_eq!(info.nonce, 2, "SYSTEM_CALLER nonce must reflect both system txs");
     }
 
-    // --- U-7: `set_system_tx_gas_exemption` on one reused EVM ---
+    // --- U-9: `set_system_tx_gas_exemption` on one reused EVM ---
 
     /// RPC replays run a block's `SYSTEM_CALLER` prefix and its user txs on one EVM, so the
     /// exemption must switch on for the system tx, back off for the next user tx, and stay off
     /// before Alpha.
     #[test]
-    fn u7_set_system_tx_gas_exemption_follows_sender_and_fork() {
+    fn u9_set_system_tx_gas_exemption_follows_sender_and_fork() {
         let user = address!("0000000000000000000000000000000000001234");
         let user_tx = |chain_id| TxEnv { caller: user, ..system_tx_env(0, chain_id) };
         let is_base_fee_rejection = |err: &EVMError<_>| {
@@ -1286,6 +1286,10 @@ mod tests {
         evm.transact(system_tx_env(0, chain_id)).expect("post-Alpha system tx must be gas-exempt");
 
         evm_config.set_system_tx_gas_exemption(&mut evm, user);
+        assert!(
+            !evm.cfg_env().disable_balance_check,
+            "user tx must not keep the balance-check exemption"
+        );
         let err = evm.transact(user_tx(chain_id)).expect_err("user tx must not keep the exemption");
         assert!(is_base_fee_rejection(&err), "unexpected error: {err:?}");
 

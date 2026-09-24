@@ -45,11 +45,16 @@
 #      Without invariant 9, a newly added test file is silently skipped by
 #      CI (as happened with the six #367 / #370 files) — assertions may
 #      pass locally but never gate a merge.
-#  10. (#441) Every EVM or block executor built under `crates/rpc` registers
-#      the Gravity precompiles (`register_custom_precompiles` within 12
-#      lines), and every file that replays block txs through
-#      `executor_for_block` applies `set_system_tx_gas_exemption`. EVMs that
-#      only run system calls carry the marker `gravity-invariant: no-block-tx`.
+#  10. (#441) Every `evm_with_env(` / `evm_with_env_and_inspector(` /
+#      `create_evm_with_inspector(` / `executor_for_block(` call under
+#      `crates/rpc` registers the Gravity precompiles
+#      (`register_custom_precompiles` within 12 lines), and every file that
+#      replays block txs through `executor_for_block` applies
+#      `set_system_tx_gas_exemption`. EVMs that only run system calls carry
+#      the marker `gravity-invariant: no-block-tx`. Whole-block executors
+#      (`executor(` / `batch_executor(`, used by `debug_executionWitness` and
+#      `reth_getBlockExecutionOutcome`) are not checked: known gap, tracked
+#      separately.
 #
 # Invocation:
 #   bash scripts/check-gravity-invariants.sh
@@ -346,6 +351,8 @@ ok 9 "CI --test allowlist + KNOWN_UNWIRED_TESTS jointly cover all gravity_system
 #        only runs system calls and never a block tx).
 #   10b: every file with an unmarked `executor_for_block(` call references
 #        `set_system_tx_gas_exemption`.
+# Whole-block `executor(` / `batch_executor(` calls are not checked (known gap,
+# tracked separately).
 # `rpc-eth-api/src/helpers/bal.rs` is skipped: it is not in the module tree.
 # ---------------------------------------------------------------------------
 echo "Invariant 10 (#441): RPC EVM/executor constructions register precompiles and apply the system-tx gas exemption"
