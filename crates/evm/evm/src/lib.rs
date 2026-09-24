@@ -497,6 +497,24 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         unimplemented!("transact_system_txn not implemented for this ConfigureEvm")
     }
 
+    /// Sets the Gravity system transaction gas exemption on `evm` for the next transaction.
+    ///
+    /// After Alpha, canonical execution runs every `SYSTEM_CALLER` transaction without the base
+    /// fee and balance checks. A caller that re-executes several persisted block transactions on
+    /// one EVM (the RPC replays) calls this before each of them with the transaction's recovered
+    /// sender: the exemption is switched on for a system transaction and off again for a user one.
+    ///
+    /// Only pass senders of transactions taken from a block. A `from` supplied by an RPC caller
+    /// must never reach this, or a simulation could spoof `SYSTEM_CALLER` and skip the checks.
+    ///
+    /// Default: no-op, for chains without Gravity system transactions.
+    fn set_system_tx_gas_exemption<DB: Database, I: InspectorFor<Self, DB>>(
+        &self,
+        _evm: &mut EvmFor<Self, DB, I>,
+        _sender: Address,
+    ) {
+    }
+
     /// Returns a new [`ParallelExecutor`].
     #[cfg(feature = "std")]
     fn parallel_executor<'a, DB: ParallelDatabase + 'a>(

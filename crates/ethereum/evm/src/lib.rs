@@ -34,7 +34,7 @@ use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, MAINNET};
 use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm::{
     eth::NextEvmEnvAttributes, execute::BlockExecutionError, parallel_execute::ParallelExecutor,
-    ConfigureEvm, EvmEnv, NextBlockEnvAttributes, ParallelDatabase,
+    ConfigureEvm, EvmEnv, EvmFor, InspectorFor, NextBlockEnvAttributes, ParallelDatabase,
 };
 use reth_primitives_traits::{constants::GRAVITY_TX_GAS_LIMIT_CAP, SealedBlock, SealedHeader};
 use revm::{
@@ -335,6 +335,20 @@ where
         };
         db.commit(evm_state);
         Ok(execution_result)
+    }
+
+    fn set_system_tx_gas_exemption<DB: Database, I: InspectorFor<Self, DB>>(
+        &self,
+        evm: &mut EvmFor<Self, DB, I>,
+        sender: Address,
+    ) {
+        // Same predicate as `transact_system_txn`, keyed on the block the EVM executes.
+        let block_ts: u64 = evm.block().timestamp.saturating_to();
+        let exempt = is_gravity_system_caller(sender) &&
+            is_system_tx_gas_exempt(self.chain_spec().as_ref(), block_ts);
+        let cfg = &mut evm.ctx_mut().cfg;
+        cfg.disable_base_fee = exempt;
+        cfg.disable_balance_check = exempt;
     }
 }
 

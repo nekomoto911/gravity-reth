@@ -533,6 +533,7 @@ mod tests {
     use revm::{
         bytecode::Bytecode,
         context::TxEnv,
+        context_interface::result::{EVMError, InvalidTransaction},
         database::{CacheDB, EmptyDB},
         precompile::{PrecompileId, PrecompileOutput},
         primitives::TxKind,
@@ -1258,6 +1259,47 @@ mod tests {
         let info = serial_acc.info.as_ref().expect("SYSTEM_CALLER info present");
         assert_eq!(info.balance, U256::ZERO, "SYSTEM_CALLER balance must stay zero (gas-exempt)");
         assert_eq!(info.nonce, 2, "SYSTEM_CALLER nonce must reflect both system txs");
+    }
+
+    // --- U-7: `set_system_tx_gas_exemption` on one reused EVM ---
+
+    /// RPC replays run a block's `SYSTEM_CALLER` prefix and its user txs on one EVM, so the
+    /// exemption must switch on for the system tx, back off for the next user tx, and stay off
+    /// before Alpha.
+    #[test]
+    fn u7_set_system_tx_gas_exemption_follows_sender_and_fork() {
+        let user = address!("0000000000000000000000000000000000001234");
+        let user_tx = |chain_id| TxEnv { caller: user, ..system_tx_env(0, chain_id) };
+        let is_base_fee_rejection = |err: &EVMError<_>| {
+            matches!(err, EVMError::Transaction(InvalidTransaction::GasPriceLessThanBasefee))
+        };
+
+        // Post-Alpha: exempt for SYSTEM_CALLER, charged again for the user tx that follows.
+        let chain_spec = alpha_active_chainspec(1);
+        let chain_id = chain_spec.chain().id();
+        let evm_config = EthEvmConfig::new(chain_spec);
+        let evm_env = evm_config.evm_env(&alpha_block_header(1)).expect("evm_env must build");
+        let mut db = seeded_db(U256::ZERO, 0);
+        let mut evm = evm_config.evm_with_env(&mut db, evm_env);
+
+        evm_config.set_system_tx_gas_exemption(&mut evm, SYSTEM_CALLER);
+        evm.transact(system_tx_env(0, chain_id)).expect("post-Alpha system tx must be gas-exempt");
+
+        evm_config.set_system_tx_gas_exemption(&mut evm, user);
+        let err = evm.transact(user_tx(chain_id)).expect_err("user tx must not keep the exemption");
+        assert!(is_base_fee_rejection(&err), "unexpected error: {err:?}");
+
+        // Pre-Alpha (Alpha at ts 2, block at ts 1): SYSTEM_CALLER pays like everyone else.
+        let evm_config = EthEvmConfig::new(alpha_active_chainspec(2));
+        let evm_env = evm_config.evm_env(&alpha_block_header(1)).expect("evm_env must build");
+        let mut db = seeded_db(U256::ZERO, 0);
+        let mut evm = evm_config.evm_with_env(&mut db, evm_env);
+
+        evm_config.set_system_tx_gas_exemption(&mut evm, SYSTEM_CALLER);
+        let err = evm
+            .transact(system_tx_env(0, chain_id))
+            .expect_err("pre-Alpha system tx is not exempt");
+        assert!(is_base_fee_rejection(&err), "unexpected error: {err:?}");
     }
 
     /// Executor-level custom precompiles are scoped to Grevm's user-transaction scheduler.
