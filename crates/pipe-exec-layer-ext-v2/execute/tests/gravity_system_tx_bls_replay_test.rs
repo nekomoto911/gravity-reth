@@ -36,6 +36,11 @@
 //!      unconditional BLS registration (covers the `call.rs:733-807` `replay_transactions_until`
 //!      family of `inspect` callers).
 //!
+//!   4. **#441 — replays outside the trace family**: on a block `[onBlockStart, BLS call,
+//!      transfer]`, `debug_accountAt` / `debug_accountInfoAt`, `eth_callMany`,
+//!      `spawn_replay_transaction` (behind `ots_getTransactionError`), `debug_intermediateRoots`
+//!      and `debug_traceCallMany` must reproduce canonical execution before and after Alpha.
+//!
 //! Location note: §3.5 nominally targets `crates/rpc/rpc/tests/` but the
 //! reth-rpc crate has no `tests/` directory and the pipe-exec-layer harness
 //! already exposes the full RPC registry (`handle.node.rpc_registry.debug_api()`
@@ -52,15 +57,20 @@
 //! `gravity_bls_precompile_test.rs::POISON_GAS_LIMIT` style: any 144-byte
 //! buffer is enough to drive the precompile through its full code path.
 
-use alloy_consensus::{SignableTransaction, TxEip1559};
+use alloy_consensus::{BlockHeader, SignableTransaction, Transaction as _, TxEip1559};
 use alloy_eips::BlockId;
-use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
-use alloy_rpc_types_eth::TransactionRequest;
+use alloy_primitives::{address, b256, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_rpc_types_eth::{
+    state::{AccountOverride, StateOverride},
+    Bundle, Index, StateContext, TransactionIndex, TransactionInput, TransactionRequest,
+};
 use alloy_rpc_types_trace::geth::{
     call::CallConfig, CallFrame, GethDebugTracingOptions, GethTrace, TraceResult,
 };
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
+use alloy_sol_macro::sol;
+use alloy_sol_types::SolCall;
 use gravity_api_types::{
     config_storage::{BlockNumber, ConfigStorage, OnChainConfig},
     events::contract_event::GravityEvent,
@@ -76,16 +86,23 @@ use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use reth_node_builder::{EngineNodeLauncher, NodeBuilder, WithLaunchContext};
 use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_pipe_exec_layer_ext_v2::{
-    new_pipe_exec_layer_api, ExecutionArgs, OrderedBlock, PipeExecLayerApi,
+    new_pipe_exec_layer_api,
+    onchain_config::{SYSTEM_CALLER, TIMESTAMP_ADDR},
+    ExecutionArgs, OrderedBlock, PipeExecLayerApi,
 };
 use reth_provider::{
-    providers::BlockchainProvider, BlockHashReader, BlockNumReader, DatabaseProviderFactory,
-    HeaderProvider, ReceiptProvider,
+    providers::BlockchainProvider, BlockHashReader, BlockNumReader, BlockReader,
+    DatabaseProviderFactory, HeaderProvider, ReceiptProvider, StateProviderFactory,
+    TransactionVariant,
 };
-use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
+use reth_rpc_eth_api::{
+    helpers::{Call, EthCall},
+    RpcTypes,
+};
 use reth_tracing::{
     tracing_subscriber::filter::LevelFilter, LayerInfo, LogFormat, RethTracer, Tracer,
 };
+use revm::Database as _;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 // ---------------------------------------------------------------------------
@@ -127,6 +144,19 @@ const ALPHA_TIME_NEVER: u64 = 9_999_999_999;
 /// Block at which the BLS user tx is injected. We push empty blocks 1..(N-1)
 /// first so the chain has stabilised, then inject at this block number.
 const BLS_BLOCK_NUMBER: u64 = 5;
+/// Anvil account 1. Only `gravity_alpha_chainspec_with_second_sender` funds it, so the transfer
+/// it sends after the BLS call never touches the BLS sender's account.
+const SECOND_PRIVKEY: B256 =
+    b256!("59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
+const SECOND_SENDER_ALLOC_KEY: &str = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8";
+/// Recipient of the 1-wei transfer that closes the #441 fixture block.
+const TRANSFER_RECIPIENT: Address = address!("0000000000000000000000000000000000c0ffee");
+/// Address that the state override turns into a "return the target's balance" probe.
+const BALANCE_PROBE: Address = address!("0000000000000000000000000000000000ba1a0e");
+
+sol! {
+    function nowMicroseconds() external view returns (uint64);
+}
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -145,12 +175,31 @@ fn funded_signer() -> PrivateKeySigner {
         .expect("funded test key must parse")
 }
 
+/// Same chain spec, plus a funded Anvil account 1 that sends the #441 fixture's transfer.
+fn gravity_alpha_chainspec_with_second_sender(alpha_time: u64) -> String {
+    let mut json: serde_json::Value = serde_json::from_str(&gravity_alpha_chainspec(alpha_time))
+        .expect("chain spec must round-trip as JSON");
+    json["alloc"][SECOND_SENDER_ALLOC_KEY] =
+        serde_json::json!({ "balance": "0x3635c9adc5dea00000" });
+    json.to_string()
+}
+
+fn second_signer() -> PrivateKeySigner {
+    PrivateKeySigner::from_bytes(&SECOND_PRIVKEY).expect("second test key must parse")
+}
+
 fn mock_block_id(block_number: u64) -> B256 {
     B256::left_padding_from(&block_number.to_be_bytes())
 }
 
 fn ts_us(block_number: u64) -> u64 {
     (TS_BASE + block_number) * 1_000_000
+}
+
+fn sign_eip1559(sender: &PrivateKeySigner, tx: TxEip1559) -> TransactionSigned {
+    let signature: Signature =
+        sender.sign_hash_sync(&tx.signature_hash()).expect("tx signing must succeed");
+    TransactionSigned::new_unhashed(Transaction::Eip1559(tx), signature)
 }
 
 /// Build and sign an EIP-1559 transaction calling `BLS_PRECOMPILE_ADDR` with
@@ -173,13 +222,46 @@ fn build_bls_call_tx(
         access_list: Default::default(),
         input,
     };
-    let sig_hash = tx.signature_hash();
-    let signature: Signature = sender.sign_hash_sync(&sig_hash).expect("tx signing must succeed");
-    let signed = tx.into_signed(signature);
-    let (tx, sig, _hash) = signed.into_parts();
-    let signed_tx = TransactionSigned::new_unhashed(Transaction::Eip1559(tx), sig);
-    let _ = signed_tx.hash();
-    (signed_tx, sender.address())
+    (sign_eip1559(sender, tx), sender.address())
+}
+
+/// Signs a 1-wei EIP-1559 transfer to `TRANSFER_RECIPIENT`.
+fn build_transfer_tx(sender: &PrivateKeySigner, nonce: u64) -> (TransactionSigned, Address) {
+    let tx = TxEip1559 {
+        chain_id: CHAIN_ID,
+        nonce,
+        gas_limit: 21_000,
+        max_fee_per_gas: 1_000_000_000,
+        max_priority_fee_per_gas: 0,
+        to: TxKind::Call(TRANSFER_RECIPIENT),
+        value: U256::from(1),
+        access_list: Default::default(),
+        input: Bytes::new(),
+    };
+    (sign_eip1559(sender, tx), sender.address())
+}
+
+/// Runtime code that returns `target`'s balance as one 32-byte word:
+/// PUSH20 target, BALANCE, PUSH1 0, MSTORE, PUSH1 32, PUSH1 0, RETURN.
+fn balance_probe_override(target: Address) -> StateOverride {
+    let mut code = vec![0x73];
+    code.extend_from_slice(target.as_slice());
+    code.extend_from_slice(&[0x31, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3]);
+    let mut overrides = StateOverride::default();
+    overrides
+        .insert(BALANCE_PROBE, AccountOverride { code: Some(code.into()), ..Default::default() });
+    overrides
+}
+
+/// One bundle: read the probed balance, then `Timestamp.nowMicroseconds()`.
+fn probe_bundle() -> Vec<Bundle<TransactionRequest>> {
+    let probe = TransactionRequest { to: Some(TxKind::Call(BALANCE_PROBE)), ..Default::default() };
+    let now = TransactionRequest {
+        to: Some(TxKind::Call(TIMESTAMP_ADDR)),
+        input: TransactionInput::new(nowMicrosecondsCall {}.abi_encode().into()),
+        ..Default::default()
+    };
+    vec![Bundle { transactions: vec![probe, now], block_override: None }]
 }
 
 fn empty_ordered_block(
@@ -379,6 +461,10 @@ enum ReplayEndpoint {
     BlockFamilyDebugTraceBlock,
     /// §3.5 must-pass row #3 — single-tx `debug_traceTransaction` w/ callTracer.
     SingleTxDebugTraceTransaction,
+    /// #441 — replays outside the trace family: executor-driven ones (`debug_accountAt`,
+    /// `eth_callMany`, `ots_getTransactionError`), `debug_intermediateRoots` and
+    /// `debug_traceCallMany`.
+    ExecutorFamily,
 }
 
 async fn run_bls_replay(
@@ -422,7 +508,7 @@ async fn run_bls_replay(
         latest_block_header,
         latest_block_hash,
         rx,
-        eth_api,
+        eth_api.clone(),
     );
     tx.send(ExecutionArgs { block_number_to_block_id: BTreeMap::new() }).unwrap();
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -444,14 +530,25 @@ async fn run_bls_replay(
         build_bls_call_tx(&sender, 0, Bytes::from(vec![0u8; BLS_INPUT_LEN]));
     let bls_tx_hash: B256 = *bls_tx.hash();
 
+    // #441 appends a transfer from a second account, so that `transaction_index = 2` still
+    // replays the BLS call while the BLS sender's final state stays the one after that call.
+    let transfer = matches!(endpoint, ReplayEndpoint::ExecutorFamily)
+        .then(|| build_transfer_tx(&second_signer(), 0));
+    let mut block_txs = vec![bls_tx];
+    let mut block_senders = vec![sender_addr];
+    if let Some((transfer_tx, transfer_sender)) = &transfer {
+        block_txs.push(transfer_tx.clone());
+        block_senders.push(*transfer_sender);
+    }
+
     let block = ordered_block_with_txs(
         epoch,
         BLS_BLOCK_NUMBER,
         mock_block_id(BLS_BLOCK_NUMBER),
         mock_block_id(BLS_BLOCK_NUMBER - 1),
         ts_us(BLS_BLOCK_NUMBER),
-        vec![bls_tx],
-        vec![sender_addr],
+        block_txs,
+        block_senders,
     );
     let result = consensus.push_one(&mut epoch, block).await;
     let pipeline_api = consensus.into_inner();
@@ -623,6 +720,161 @@ async fn run_bls_replay(
                 output.len()
             );
         }
+
+        ReplayEndpoint::ExecutorFamily => {
+            let (transfer_tx, transfer_sender) =
+                transfer.as_ref().expect("ExecutorFamily always appends the transfer");
+            assert_eq!(
+                format!("{transfer_sender:#x}"),
+                SECOND_SENDER_ALLOC_KEY,
+                "[{label}] second key and its genesis alloc entry must match"
+            );
+            let block_id = BlockId::Number(BLS_BLOCK_NUMBER.into());
+            let block = provider
+                .recovered_block(BLS_BLOCK_NUMBER.into(), TransactionVariant::WithHash)
+                .expect("provider block read")
+                .unwrap_or_else(|| panic!("[{label}] block {BLS_BLOCK_NUMBER} must be persisted"));
+            let header = block.header();
+            let base_fee = header.base_fee_per_gas().expect("London is active from genesis");
+            let exempt =
+                reth_chainspec::is_system_tx_gas_exempt(chain_spec.as_ref(), header.timestamp());
+
+            // Fixture sanity: [onBlockStart, BLS call, transfer], and the system tx is priced the
+            // way the regime under test expects.
+            let senders: Vec<Address> =
+                block.transactions_recovered().map(|tx| tx.signer()).collect();
+            assert_eq!(
+                senders,
+                vec![SYSTEM_CALLER, sender_addr, *transfer_sender],
+                "[{label}] block shape"
+            );
+            let tx_hashes: Vec<B256> =
+                block.body().transactions.iter().map(|tx| *tx.hash()).collect();
+            assert_eq!(
+                tx_hashes[1..],
+                [bls_tx_hash, *transfer_tx.hash()],
+                "[{label}] user tx order"
+            );
+            let system_tx_price = block.body().transactions[0].max_fee_per_gas();
+            if exempt {
+                assert!(
+                    base_fee > 0 && system_tx_price == 0,
+                    "[{label}] post-Alpha fixture needs a zero-price system tx under a non-zero \
+                     base fee, got price={system_tx_price} base_fee={base_fee}"
+                );
+            } else {
+                assert_eq!(
+                    system_tx_price,
+                    u128::from(base_fee),
+                    "[{label}] pre-Alpha system tx pays the base fee"
+                );
+            }
+
+            // Guard: the trace family already replays correctly without #441. A divergence here
+            // means the fixture hits a gap outside #441 (for example the mint precompile, #372):
+            // stop and report instead of weakening the checks below.
+            let traces = debug_api
+                .debug_trace_block(
+                    block_id,
+                    GethDebugTracingOptions::call_tracer(CallConfig::default()),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("[{label}] debug_trace_block errored: {e:?}"));
+            for (idx, entry) in traces.iter().enumerate() {
+                assert_eq!(
+                    expect_call_frame(entry, label).gas_used,
+                    U256::from(canonical_per_tx_gas(&receipts, idx)),
+                    "[{label}] debug_traceBlock tx {idx} already diverges from canonical"
+                );
+            }
+
+            let post_state =
+                provider.history_by_block_number(BLS_BLOCK_NUMBER).expect("post-block state");
+            let sender_balance =
+                post_state.account_balance(&sender_addr).unwrap().expect("BLS sender exists");
+            let sender_nonce =
+                post_state.account_nonce(&sender_addr).unwrap().expect("BLS sender exists");
+            // Right before the transfer: onBlockStart and the BLS call are replayed.
+            let before_transfer = Some(StateContext {
+                block_number: Some(block_id),
+                transaction_index: Some(TransactionIndex::Index(2)),
+            });
+
+            // (1) debug_accountInfoAt / debug_accountAt through tx 1: the executor replays
+            // onBlockStart (gas exemption) and the BLS call (precompile).
+            let info = debug_api
+                .debug_account_info_at(block_id, Index::from(1), sender_addr)
+                .await
+                .unwrap_or_else(|e| panic!("[{label}] debug_account_info_at errored: {e:?}"))
+                .expect("block exists");
+            assert_eq!(
+                (info.balance, info.nonce),
+                (sender_balance, sender_nonce),
+                "[{label}] debug_accountInfoAt"
+            );
+            let account = debug_api
+                .debug_account_at(block_id, Index::from(1), sender_addr)
+                .await
+                .unwrap_or_else(|e| panic!("[{label}] debug_account_at errored: {e:?}"))
+                .expect("block exists");
+            assert_eq!(
+                (account.balance, account.nonce),
+                (sender_balance, sender_nonce),
+                "[{label}] debug_accountAt"
+            );
+
+            // (2) eth_callMany right before the transfer.
+            let responses = eth_api
+                .call_many(
+                    probe_bundle(),
+                    before_transfer,
+                    Some(balance_probe_override(sender_addr)),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("[{label}] eth_callMany errored: {e:?}"));
+            let probed = responses[0][0].value.as_ref().expect("probe call must succeed");
+            assert_eq!(
+                U256::from_be_slice(probed),
+                sender_balance,
+                "[{label}] eth_callMany replayed the BLS call"
+            );
+            let now = responses[0][1].value.as_ref().expect("nowMicroseconds must succeed");
+            assert_eq!(
+                nowMicrosecondsCall::abi_decode_returns(now).unwrap(),
+                ts_us(BLS_BLOCK_NUMBER),
+                "[{label}] eth_callMany replayed onBlockStart"
+            );
+
+            // (3) spawn_replay_transaction (behind ots_getTransactionError) for every target; the
+            // callback's database shows the replayed prefix before the transfer.
+            for (idx, hash) in tx_hashes.iter().copied().enumerate() {
+                let (gas, sender_balance_before) = eth_api
+                    .spawn_replay_transaction(hash, move |_, res, mut db| {
+                        let before = db
+                            .basic(sender_addr)
+                            .expect("state read")
+                            .expect("BLS sender exists")
+                            .balance;
+                        Ok((res.result.tx_gas_used(), before))
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!("[{label}] spawn_replay_transaction({idx}) errored: {e:?}")
+                    })
+                    .expect("tx exists");
+                assert_eq!(
+                    gas,
+                    canonical_per_tx_gas(&receipts, idx),
+                    "[{label}] replayed gas of tx {idx}"
+                );
+                if idx == 2 {
+                    assert_eq!(
+                        sender_balance_before, sender_balance,
+                        "[{label}] replay prefix before the transfer"
+                    );
+                }
+            }
+        }
     }
 
     println!(
@@ -674,6 +926,27 @@ fn test_rpc_bls_call_debug_trace_transaction_byte_equal() {
                 ReplayEndpoint::SingleTxDebugTraceTransaction,
             )
         },
+    );
+}
+
+/// #441 — post-Alpha: the system tx at index 0 needs the gas exemption, the BLS call at index 1
+/// needs the precompile.
+#[test]
+fn test_rpc_executor_replay_post_alpha() {
+    run_pipe_e2e_test(
+        &gravity_alpha_chainspec_with_second_sender(ALPHA_TIME_ALWAYS),
+        "data/gravity_system_tx_bls_replay_executor_post_alpha",
+        |b| run_bls_replay(b, "executor_post_alpha", ReplayEndpoint::ExecutorFamily),
+    );
+}
+
+/// #441 — pre-Alpha: the system tx pays the base fee, only the BLS precompile decides the result.
+#[test]
+fn test_rpc_executor_replay_pre_alpha() {
+    run_pipe_e2e_test(
+        &gravity_alpha_chainspec_with_second_sender(ALPHA_TIME_NEVER),
+        "data/gravity_system_tx_bls_replay_executor_pre_alpha",
+        |b| run_bls_replay(b, "executor_pre_alpha", ReplayEndpoint::ExecutorFamily),
     );
 }
 

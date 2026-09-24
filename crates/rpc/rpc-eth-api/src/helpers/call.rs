@@ -381,7 +381,15 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         .executor_for_block(&mut db, block.sealed_block())
                         .map_err(RethError::other)
                         .map_err(Self::Error::from_eth_err)?;
+                    this.register_custom_precompiles(
+                        executor.evm_mut(),
+                        evm_env.block_env.number(),
+                        evm_env.block_env.timestamp(),
+                        evm_env.block_env.prevrandao(),
+                    );
                     for tx in block.transactions_recovered().take(num_txs) {
+                        RpcNodeCore::evm_config(&this)
+                            .set_system_tx_gas_exemption(executor.evm_mut(), tx.signer());
                         executor.execute_transaction(tx).map_err(Self::Error::from_eth_err)?;
                     }
                 }
@@ -796,6 +804,7 @@ pub trait Call:
                 Some(res) => res,
             };
             let (tx, tx_info) = transaction.split();
+            let evm_env = self.evm_env_for_header(block.sealed_block().sealed_header())?;
 
             // we need to get the state of the parent block because we're essentially replaying the
             // block the transaction is included in
@@ -809,15 +818,25 @@ pub trait Call:
                     .executor_for_block(&mut db, block.sealed_block())
                     .map_err(RethError::other)
                     .map_err(Self::Error::from_eth_err)?;
+                this.register_custom_precompiles(
+                    executor.evm_mut(),
+                    evm_env.block_env.number(),
+                    evm_env.block_env.timestamp(),
+                    evm_env.block_env.prevrandao(),
+                );
 
                 // replay all transactions prior to the targeted transaction
                 for block_tx in block_txs {
                     if block_tx.tx_hash() == tx.tx_hash() {
                         break;
                     }
+                    RpcNodeCore::evm_config(&this)
+                        .set_system_tx_gas_exemption(executor.evm_mut(), block_tx.signer());
                     executor.execute_transaction(block_tx).map_err(Self::Error::from_eth_err)?;
                 }
 
+                RpcNodeCore::evm_config(&this)
+                    .set_system_tx_gas_exemption(executor.evm_mut(), tx.signer());
                 let tx_env = RpcNodeCore::evm_config(&this).tx_env(tx);
 
                 let res = executor.evm_mut().transact(tx_env).map_err(Self::Error::from_evm_err)?;

@@ -687,6 +687,7 @@ where
             ))
             .into())
         }
+        let evm_env = self.eth_api().evm_env_for_header(block.sealed_block().sealed_header())?;
 
         self.eth_api()
             .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
@@ -696,8 +697,17 @@ where
                     .executor_for_block(&mut db, block.sealed_block())
                     .map_err(RethError::other)
                     .map_err(Eth::Error::from_eth_err)?;
+                eth_api.register_custom_precompiles(
+                    executor.evm_mut(),
+                    evm_env.block_env.number(),
+                    evm_env.block_env.timestamp(),
+                    evm_env.block_env.prevrandao(),
+                );
 
                 for tx in block.transactions_recovered().take(tx_index + 1) {
+                    eth_api
+                        .evm_config()
+                        .set_system_tx_gas_exemption(executor.evm_mut(), tx.signer());
                     executor.execute_transaction(tx).map_err(Eth::Error::from_eth_err)?;
                 }
                 drop(executor);
