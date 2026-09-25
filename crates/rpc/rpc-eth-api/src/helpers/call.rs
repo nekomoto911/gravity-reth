@@ -209,9 +209,6 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         }
                     };
 
-                    let block_number = evm_env.block_env.number();
-                    let block_timestamp = evm_env.block_env.timestamp();
-                    let current_randomness = evm_env.block_env.prevrandao();
                     let (result, results) = if trace_transfers {
                         // prepare inspector to capture transfer inside the evm so they are recorded
                         // and included in logs
@@ -219,12 +216,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         let mut evm = this
                             .evm_config()
                             .evm_with_env_and_inspector(&mut db, evm_env, inspector);
-                        this.register_custom_precompiles(
-                            &mut evm,
-                            block_number,
-                            block_timestamp,
-                            current_randomness,
-                        );
+                        this.register_custom_precompiles(&mut evm);
                         let mut builder = this.evm_config().create_block_builder(evm, &parent, ctx);
 
                         if let Some(ref state_overrides) = state_overrides {
@@ -247,12 +239,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         .map_err(map_err)?
                     } else {
                         let mut evm = this.evm_config().evm_with_env(&mut db, evm_env);
-                        this.register_custom_precompiles(
-                            &mut evm,
-                            block_number,
-                            block_timestamp,
-                            current_randomness,
-                        );
+                        this.register_custom_precompiles(&mut evm);
                         let mut builder = this.evm_config().create_block_builder(evm, &parent, ctx);
 
                         if let Some(ref state_overrides) = state_overrides {
@@ -381,12 +368,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         .executor_for_block(&mut db, block.sealed_block())
                         .map_err(RethError::other)
                         .map_err(Self::Error::from_eth_err)?;
-                    this.register_custom_precompiles(
-                        executor.evm_mut(),
-                        evm_env.block_env.number(),
-                        evm_env.block_env.timestamp(),
-                        evm_env.block_env.prevrandao(),
-                    );
+                    this.register_custom_precompiles(executor.evm_mut());
                     for tx in block.transactions_recovered().take(num_txs) {
                         RpcNodeCore::evm_config(&this)
                             .set_system_tx_gas_exemption(executor.evm_mut(), tx.signer());
@@ -576,14 +558,12 @@ pub trait Call:
     /// Returns the maximum number of blocks accepted for `eth_simulateV1`.
     fn max_simulate_blocks(&self) -> u64;
 
-    /// Registers chain-specific precompiles for this EVM block.
-    fn register_custom_precompiles<EV>(
-        &self,
-        _evm: &mut EV,
-        _block_number: U256,
-        _block_timestamp: U256,
-        _current_randomness: Option<B256>,
-    ) where
+    /// Registers chain-specific precompiles on `evm`.
+    ///
+    /// Implementations read the block number, timestamp and prevrandao from `evm.block()`, so
+    /// the precompiles always match the block the EVM executes.
+    fn register_custom_precompiles<EV>(&self, _evm: &mut EV)
+    where
         EV: Evm<Precompiles = PrecompilesMap>,
     {
     }
@@ -631,16 +611,8 @@ pub trait Call:
     where
         DB: Database<Error = EvmDatabaseError<ProviderError>> + fmt::Debug,
     {
-        let block_number = evm_env.block_env.number();
-        let block_timestamp = evm_env.block_env.timestamp();
-        let current_randomness = evm_env.block_env.prevrandao();
         let mut evm = self.evm_config().evm_with_env(db, evm_env);
-        self.register_custom_precompiles(
-            &mut evm,
-            block_number,
-            block_timestamp,
-            current_randomness,
-        );
+        self.register_custom_precompiles(&mut evm);
         let res = evm.transact(tx_env).map_err(Self::Error::from_evm_err)?;
 
         Ok(res)
@@ -659,16 +631,8 @@ pub trait Call:
         DB: Database<Error = EvmDatabaseError<ProviderError>> + fmt::Debug,
         I: InspectorFor<Self::Evm, DB>,
     {
-        let block_number = evm_env.block_env.number();
-        let block_timestamp = evm_env.block_env.timestamp();
-        let current_randomness = evm_env.block_env.prevrandao();
         let mut evm = self.evm_config().evm_with_env_and_inspector(db, evm_env, inspector);
-        self.register_custom_precompiles(
-            &mut evm,
-            block_number,
-            block_timestamp,
-            current_randomness,
-        );
+        self.register_custom_precompiles(&mut evm);
         let res = evm.transact(tx_env).map_err(Self::Error::from_evm_err)?;
 
         Ok(res)
@@ -804,7 +768,6 @@ pub trait Call:
                 Some(res) => res,
             };
             let (tx, tx_info) = transaction.split();
-            let evm_env = self.evm_env_for_header(block.sealed_block().sealed_header())?;
 
             // we need to get the state of the parent block because we're essentially replaying the
             // block the transaction is included in
@@ -818,12 +781,7 @@ pub trait Call:
                     .executor_for_block(&mut db, block.sealed_block())
                     .map_err(RethError::other)
                     .map_err(Self::Error::from_eth_err)?;
-                this.register_custom_precompiles(
-                    executor.evm_mut(),
-                    evm_env.block_env.number(),
-                    evm_env.block_env.timestamp(),
-                    evm_env.block_env.prevrandao(),
-                );
+                this.register_custom_precompiles(executor.evm_mut());
 
                 // replay all transactions prior to the targeted transaction
                 for block_tx in block_txs {
@@ -886,12 +844,7 @@ pub trait Call:
             // The active set only changes in `finishTransition`, so the parent state in `db`
             // still maps the proposer index to the beneficiary. The view call is not committed.
             let mut evm = self.evm_config().evm_with_env(&mut *db, evm_env.clone());
-            self.register_custom_precompiles(
-                &mut evm,
-                evm_env.block_env.number(),
-                evm_env.block_env.timestamp(),
-                evm_env.block_env.prevrandao(),
-            );
+            self.register_custom_precompiles(&mut evm);
             let active_validators = evm
                 .transact_system_call(
                     SYSTEM_CALLER,
@@ -947,7 +900,6 @@ pub trait Call:
     {
         let block_number = evm_env.block_env.number();
         let block_timestamp = evm_env.block_env.timestamp();
-        let current_randomness = evm_env.block_env.prevrandao();
 
         // Gravity Alpha (system-tx gas-exempt) single-tx-family wiring. When the
         // sender of a pre-target replay tx is `SYSTEM_CALLER` and Alpha is
@@ -974,12 +926,7 @@ pub trait Call:
         initial_env.cfg_env.disable_base_fee = first_kind_system_exempt;
         initial_env.cfg_env.disable_balance_check = first_kind_system_exempt;
         let mut evm = self.evm_config().evm_with_env(db, initial_env);
-        self.register_custom_precompiles(
-            &mut evm,
-            block_number,
-            block_timestamp,
-            current_randomness,
-        );
+        self.register_custom_precompiles(&mut evm);
 
         // Protocol invariant pin: same rationale as `trace.rs`'s block-family loop —
         // pipe pins SYSTEM_CALLER-signed txs to a contiguous block-head prefix, the
@@ -1009,12 +956,7 @@ pub trait Call:
                 env_taken.cfg_env.disable_base_fee = tx_is_system_exempt;
                 env_taken.cfg_env.disable_balance_check = tx_is_system_exempt;
                 evm = self.evm_config().evm_with_env(db_taken, env_taken);
-                self.register_custom_precompiles(
-                    &mut evm,
-                    block_number,
-                    block_timestamp,
-                    current_randomness,
-                );
+                self.register_custom_precompiles(&mut evm);
                 current_kind_system_exempt = tx_is_system_exempt;
             }
 

@@ -480,12 +480,7 @@ where
                     // Execute all transactions until index on one EVM, applying the Gravity
                     // replay rules per tx; the EVM (and its borrow of `db`) ends with this block.
                     let mut evm = eth_api.evm_config().evm_with_env(&mut db, evm_env.clone());
-                    eth_api.register_custom_precompiles(
-                        &mut evm,
-                        evm_env.block_env.number(),
-                        evm_env.block_env.timestamp(),
-                        evm_env.block_env.prevrandao(),
-                    );
+                    eth_api.register_custom_precompiles(&mut evm);
                     for tx in block.transactions_recovered().take(num_txs) {
                         eth_api.evm_config().set_system_tx_gas_exemption(&mut evm, tx.signer());
                         let tx_env = eth_api.evm_config().tx_env(tx);
@@ -693,7 +688,6 @@ where
             ))
             .into())
         }
-        let evm_env = self.eth_api().evm_env_for_header(block.sealed_block().sealed_header())?;
 
         self.eth_api()
             .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
@@ -703,12 +697,7 @@ where
                     .executor_for_block(&mut db, block.sealed_block())
                     .map_err(RethError::other)
                     .map_err(Eth::Error::from_eth_err)?;
-                eth_api.register_custom_precompiles(
-                    executor.evm_mut(),
-                    evm_env.block_env.number(),
-                    evm_env.block_env.timestamp(),
-                    evm_env.block_env.prevrandao(),
-                );
+                eth_api.register_custom_precompiles(executor.evm_mut());
 
                 for tx in block.transactions_recovered().take(tx_index + 1) {
                     eth_api
@@ -823,12 +812,7 @@ where
                     let tx_env = eth_api.evm_config().tx_env(tx);
                     {
                         let mut evm = eth_api.evm_config().evm_with_env(&mut db, evm_env.clone());
-                        eth_api.register_custom_precompiles(
-                            &mut evm,
-                            evm_env.block_env.number(),
-                            evm_env.block_env.timestamp(),
-                            evm_env.block_env.prevrandao(),
-                        );
+                        eth_api.register_custom_precompiles(&mut evm);
                         eth_api.evm_config().set_system_tx_gas_exemption(&mut evm, sender);
                         evm.transact_commit(tx_env).map_err(Eth::Error::from_evm_err)?;
                     }

@@ -2,7 +2,7 @@
 
 use crate::EthApi;
 use alloy_consensus::BlockHeader;
-use alloy_primitives::{B256, U256};
+use alloy_primitives::B256;
 use gravity_precompiles::{
     bls_pop_verify::{create_bls_pop_verify_precompile, BLS_PRECOMPILE_ADDR},
     randomness_by_height::{
@@ -21,6 +21,7 @@ use reth_rpc_eth_api::{
 };
 use reth_rpc_eth_types::EthApiError;
 use reth_storage_api::HeaderProvider;
+use revm::context::Block;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -105,15 +106,14 @@ where
         self.inner.evm_memory_limit()
     }
 
-    fn register_custom_precompiles<EV>(
-        &self,
-        evm: &mut EV,
-        block_number: U256,
-        block_timestamp: U256,
-        current_randomness: Option<B256>,
-    ) where
+    fn register_custom_precompiles<EV>(&self, evm: &mut EV)
+    where
         EV: Evm<Precompiles = PrecompilesMap>,
     {
+        let block = evm.block();
+        let (block_number, block_timestamp, current_randomness) =
+            (block.number(), block.timestamp(), block.prevrandao());
+
         // BLS pop-verify precompile is registered **unconditionally** to mirror the pipe
         // execution layer, which has registered it both pre-Alpha (via `pre_alpha_precompiles`)
         // and post-Alpha. Gating it behind Alpha would cause RPC replay (debug_trace*, trace_*)
@@ -149,7 +149,7 @@ where
 mod tests {
     use super::*;
     use alloy_consensus::Header;
-    use alloy_primitives::{BlockHash, BlockNumber};
+    use alloy_primitives::{BlockHash, BlockNumber, U256};
     use reth_primitives_traits::SealedHeader;
     use std::{collections::BTreeMap, ops::RangeBounds};
 

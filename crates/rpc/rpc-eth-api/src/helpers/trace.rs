@@ -89,16 +89,8 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
         DB: Database<Error = EvmDatabaseError<ProviderError>>,
         I: InspectorFor<Self::Evm, DB>,
     {
-        let block_number = evm_env.block_env.number();
-        let block_timestamp = evm_env.block_env.timestamp();
-        let current_randomness = evm_env.block_env.prevrandao();
         let mut evm = self.evm_config().evm_with_env_and_inspector(db, evm_env, inspector);
-        self.register_custom_precompiles(
-            &mut evm,
-            block_number,
-            block_timestamp,
-            current_randomness,
-        );
+        self.register_custom_precompiles(&mut evm);
         evm.transact(tx_env).map_err(Self::Error::from_evm_err)
     }
 
@@ -376,9 +368,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
 
                 let mut idx = 0u64;
 
-                let evm_block_number = evm_env.block_env.number();
                 let evm_block_timestamp = evm_env.block_env.timestamp();
-                let current_randomness = evm_env.block_env.prevrandao();
 
                 // Gravity Alpha (system-tx gas-exempt) RPC block-family wiring.
                 //
@@ -416,12 +406,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                     initial_env,
                     inspector_setup(),
                 );
-                this.register_custom_precompiles(
-                    &mut current_evm,
-                    evm_block_number,
-                    evm_block_timestamp,
-                    current_randomness,
-                );
+                this.register_custom_precompiles(&mut current_evm);
                 let mut current_kind_system_exempt = first_kind_system_exempt;
 
                 // Protocol invariant pin: the pipe layer pins SYSTEM_CALLER-signed
@@ -458,12 +443,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                             env_taken,
                             inspector_setup(),
                         );
-                        this.register_custom_precompiles(
-                            &mut current_evm,
-                            evm_block_number,
-                            evm_block_timestamp,
-                            current_randomness,
-                        );
+                        this.register_custom_precompiles(&mut current_evm);
                         current_kind_system_exempt = tx_is_system_exempt;
                     }
 
