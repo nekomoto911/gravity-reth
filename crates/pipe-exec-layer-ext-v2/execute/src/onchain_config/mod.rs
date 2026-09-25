@@ -62,7 +62,7 @@ pub use reth_chainspec::SYSTEM_CALLER;
 pub const GENESIS_ADDR: Address = address!("00000000000000000000000000000001625f0001");
 
 // Runtime Configurations (0x1625F1xxx)
-pub const TIMESTAMP_ADDR: Address = address!("00000000000000000000000000000001625f1000");
+pub use reth_chainspec::gravity_system_contracts::TIMESTAMP_ADDR;
 pub const STAKE_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f1001");
 pub const VALIDATOR_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f1002");
 pub const RANDOMNESS_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f1003");
@@ -77,10 +77,12 @@ pub const ON_DEMAND_ORACLE_TASK_CONFIG_ADDR: Address =
 
 // Staking & Validator (0x1625F2xxx)
 pub const STAKING_ADDR: Address = address!("00000000000000000000000000000001625f2000");
-pub const VALIDATOR_MANAGER_ADDR: Address = address!("00000000000000000000000000000001625f2001");
 pub const DKG_ADDR: Address = address!("00000000000000000000000000000001625f2002");
-pub const RECONFIGURATION_ADDR: Address = address!("00000000000000000000000000000001625f2003");
-pub const BLOCK_ADDR: Address = address!("00000000000000000000000000000001625f2004");
+// Shared with RPC replay, which rebuilds the metadata transaction a pre-Alpha DKG
+// epoch-change block left out of its body.
+pub use reth_chainspec::gravity_system_contracts::{
+    BLOCK_ADDR, RECONFIGURATION_ADDR, VALIDATOR_MANAGER_ADDR,
+};
 pub const PERFORMANCE_TRACKER_ADDR: Address = address!("00000000000000000000000000000001625f2005");
 
 // Governance (0x1625F3xxx)
@@ -109,6 +111,7 @@ pub const RECONFIGURATION_WITH_DKG_ADDR: Address = RECONFIGURATION_ADDR;
 
 use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxLegacy};
 use alloy_primitives::{Bytes, Signature, U256};
+use reth_chainspec::gravity_system_contracts::SYSTEM_TXN_GAS_LIMIT;
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use revm_primitives::TxKind;
 use tracing::{debug, info};
@@ -199,7 +202,7 @@ pub(crate) fn new_system_call_txn(
             chain_id: None,
             nonce,
             gas_price,
-            gas_limit: 30_000_000,
+            gas_limit: SYSTEM_TXN_GAS_LIMIT,
             to: TxKind::Call(contract),
             value: U256::ZERO,
             input,

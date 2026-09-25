@@ -7,6 +7,13 @@ use alloy_primitives::{Bytes, U256};
 use alloy_sol_macro::sol;
 use gravity_api_types::on_chain_config::validator_set::ValidatorSet as GravityValidatorSet;
 
+// The validator-set and `onBlockStart` ABI is shared with RPC replay; one `sol!` scope must
+// hold `ValidatorConsensusInfo` together with every item that uses it.
+pub use reth_chainspec::gravity_system_contracts::{
+    getActiveValidatorsCall, getPendingActiveValidatorsCall, getPendingInactiveValidatorsCall,
+    onBlockStartCall, NewEpochEvent, ValidatorConsensusInfo,
+};
+
 // Wei to Ether conversion constant (10^18)
 const WEI_PER_ETHER: U256 = U256::from_limbs([1000000000000000000, 0, 0, 0]);
 
@@ -24,25 +31,6 @@ sol! {
         PENDING_INACTIVE // 3
     }
 
-    /// Validator consensus info (from Types.sol in gravity_chain_core_contracts)
-    /// Returned by ValidatorManagement.getActiveValidators()
-    struct ValidatorConsensusInfo {
-        address validator;           // Validator identity address
-        bytes consensusPubkey;       // BLS public key for consensus
-        bytes consensusPop;          // Proof of possession for BLS key
-        uint256 votingPower;         // Voting power derived from bond
-        uint64 validatorIndex;       // Index in active validator array
-        bytes networkAddresses;      // Network addresses for P2P communication
-        bytes fullnodeAddresses;     // Fullnode addresses for sync
-    }
-
-    // Function from ValidatorManagement contract
-    function getActiveValidators() external view returns (ValidatorConsensusInfo[] memory);
-
-    // Functions to get pending validators (now return full ValidatorConsensusInfo[])
-    function getPendingActiveValidators() external view returns (ValidatorConsensusInfo[] memory);
-    function getPendingInactiveValidators() external view returns (ValidatorConsensusInfo[] memory);
-
     // Function to get total voting power directly from contract
     function getTotalVotingPower() external view returns (uint256);
 
@@ -54,28 +42,6 @@ sol! {
 
     // Function from ValidatorPerformanceTracker
     function getAllPerformances() external view returns (IndividualPerformance[] memory);
-
-    /// NewEpochEvent from Reconfiguration.sol
-    /// Emitted when epoch transition completes with full validator set
-    event NewEpochEvent(
-        uint64 indexed newEpoch,
-        ValidatorConsensusInfo[] validatorSet,
-        uint256 totalVotingPower,
-        uint64 transitionTime
-    );
-}
-
-sol! {
-    /// onBlockStart from Blocker.sol
-    /// Called by blockchain runtime at the start of each block
-    /// @param proposerIndex Index of the block proposer in the active validator set
-    /// @param failedProposerIndices Indices of validators who failed to propose
-    /// @param timestampMicros Block timestamp in microseconds
-    function onBlockStart(
-        uint64 proposerIndex,
-        uint64[] calldata failedProposerIndices,
-        uint64 timestampMicros
-    );
 }
 
 /// Derive 32-byte AccountAddress from BLS consensus public key using SHA3-256
