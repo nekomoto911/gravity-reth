@@ -113,12 +113,8 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
 
         // The RPC client blocks on HTTP while the node serves it from its own runtime.
         tokio::task::block_in_place(|| {
-            replay::check_block(
-                &provider,
-                &rpc,
-                block.number,
-                &mut report.for_block(block.number, phase),
-            )
+            let mut block_report = report.for_block(block.number, phase);
+            replay::check_block(&provider, &rpc, &block, phase, &mut block_report)
         });
         println!(
             "[gravity_pipe] block {} at {} ({phase}){}; {} mismatches so far",

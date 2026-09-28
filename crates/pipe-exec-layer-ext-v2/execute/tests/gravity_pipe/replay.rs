@@ -6,7 +6,12 @@
 //! mainnet RPC node. Any difference, including an endpoint error, is recorded and the
 //! timeline continues.
 
-use crate::{report::BlockReport, rpc::RpcClient};
+use crate::{
+    node::CommittedBlock,
+    report::BlockReport,
+    rpc::RpcClient,
+    timeline::{Fork, Phase},
+};
 use alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS;
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_rpc_types_trace::{
@@ -17,31 +22,22 @@ use alloy_rpc_types_trace::{
 };
 use reth_ethereum_primitives::{Block, Receipt};
 use reth_pipe_exec_layer_ext_v2::onchain_config::{
-    NATIVE_ORACLE_ADDR, ORACLE_TASK_CONFIG_ADDR, TIMESTAMP_ADDR,
+    NATIVE_ORACLE_ADDR, ORACLE_TASK_CONFIG_ADDR, SYSTEM_CALLER, TIMESTAMP_ADDR,
 };
+use reth_primitives_traits::Account;
 use reth_provider::{
     BlockReader, ChangeSetReader, StateProviderBox, StateProviderFactory, StorageChangeSetReader,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Accounts the chain writes outside any transaction of the block, so no per-transaction
-/// state diff can show those writes:
-/// - the EIP-2935 block hash contract: deployed on the Prague activation block, then written by a
-///   system call before the first transaction of every block;
-/// - `Timestamp`: updated by the `onBlockStart` call that a pre-Alpha DKG epoch-change block
-///   executes but leaves out of its body;
-/// - `NativeOracle` and `OracleTaskConfig`: runtime code replaced after the last transaction of the
-///   Gamma activation block.
-const WRITTEN_OUTSIDE_TRANSACTIONS: [Address; 4] =
-    [HISTORY_STORAGE_ADDRESS, TIMESTAMP_ADDR, NATIVE_ORACLE_ADDR, ORACLE_TASK_CONFIG_ADDR];
-
-/// Replays committed block `number` through every whole-block endpoint and records each
+/// Replays a committed block through every whole-block endpoint and records each
 /// difference from the committed result.
 pub(crate) fn check_block<P>(
     provider: &P,
     rpc: &RpcClient,
-    number: u64,
+    block: &CommittedBlock,
+    phase: Phase,
     report: &mut BlockReport<'_>,
 ) where
     P: BlockReader<Block = Block, Receipt = Receipt>
@@ -50,8 +46,8 @@ pub(crate) fn check_block<P>(
         + StorageChangeSetReader,
 {
     // Step 1: what the pipe committed.
-    let committed = Committed::read(provider, number);
-    let number_hex = format!("{number:#x}");
+    let committed = Committed::read(provider, block, phase);
+    let number_hex = format!("{:#x}", block.number);
 
     // Step 2: whole-block traces. Geth-style traces expose each transaction's gas and
     // success; parity-style traces expose success, and the state diffs of all
@@ -89,8 +85,10 @@ struct Committed {
     block: Block,
     tx_hashes: Vec<B256>,
     receipts: Vec<Receipt>,
-    /// Accounts the block changed, with the storage slots it changed.
-    changed_accounts: BTreeMap<Address, BTreeSet<B256>>,
+    /// Accounts the block changed, keyed by address.
+    changed_accounts: BTreeMap<Address, ChangedAccount>,
+    /// Account fields the block wrote outside its transactions.
+    outside_writes: Vec<(Address, Field)>,
     /// State after the block.
     post_state: StateProviderBox,
 }
@@ -98,13 +96,14 @@ struct Committed {
 impl Committed {
     /// Panics when the node cannot serve its own committed block: that is a harness
     /// failure, not a replay mismatch.
-    fn read<P>(provider: &P, number: u64) -> Self
+    fn read<P>(provider: &P, pipe_block: &CommittedBlock, phase: Phase) -> Self
     where
         P: BlockReader<Block = Block, Receipt = Receipt>
             + StateProviderFactory
             + ChangeSetReader
             + StorageChangeSetReader,
     {
+        let number = pipe_block.number;
         let hash = provider.block_hash(number).unwrap().expect("committed block hash");
         let block = provider.block_by_number(number).unwrap().expect("committed block");
         let receipts =
@@ -113,15 +112,28 @@ impl Committed {
         assert_eq!(receipts.len(), tx_hashes.len(), "block {number}: one receipt per transaction");
 
         // Changesets hold the pre-block values of whatever the block changed; the current
-        // values come from the state after the block.
-        let mut changed_accounts: BTreeMap<Address, BTreeSet<B256>> = provider
+        // values come from the state after the block. An account whose info has no changeset
+        // row only had its storage changed.
+        let post_state = provider.history_by_block_number(number).unwrap();
+        let mut changed_accounts: BTreeMap<Address, ChangedAccount> = provider
             .account_block_changeset(number)
             .unwrap()
             .into_iter()
-            .map(|change| (change.address, BTreeSet::new()))
+            .map(|change| {
+                let pre = change.info.unwrap_or_default();
+                (change.address, ChangedAccount { pre, slots: BTreeSet::new() })
+            })
             .collect();
         for (key, entry) in provider.storage_changeset(number).unwrap() {
-            changed_accounts.entry(key.address()).or_default().insert(entry.key);
+            let address = key.address();
+            changed_accounts
+                .entry(address)
+                .or_insert_with(|| ChangedAccount {
+                    pre: post_state.basic_account(&address).unwrap().unwrap_or_default(),
+                    slots: BTreeSet::new(),
+                })
+                .slots
+                .insert(entry.key);
         }
 
         Self {
@@ -131,7 +143,8 @@ impl Committed {
             tx_hashes,
             receipts,
             changed_accounts,
-            post_state: provider.history_by_block_number(number).unwrap(),
+            outside_writes: written_outside_transactions(phase, pipe_block.epoch_changed),
+            post_state,
         }
     }
 
@@ -146,6 +159,7 @@ impl Committed {
         PostAccount {
             balance: account.balance,
             nonce: account.nonce,
+            code_hash: account.get_bytecode_hash(),
             code: code.map(|code| code.original_bytes()).unwrap_or_default(),
         }
     }
@@ -155,10 +169,28 @@ impl Committed {
     }
 }
 
+/// An account the block changed.
+struct ChangedAccount {
+    /// Account info before the block; a missing account reads as empty.
+    pre: Account,
+    /// Storage slots the block changed.
+    slots: BTreeSet<B256>,
+}
+
+/// A part of an account that the chain may write outside the block's transactions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Balance,
+    Nonce,
+    Code,
+    Storage,
+}
+
 /// An account after the block; a missing account reads as empty.
 struct PostAccount {
     balance: U256,
     nonce: u64,
+    code_hash: B256,
     code: Bytes,
 }
 
@@ -333,23 +365,81 @@ fn check_state_diffs(
         }
     }
 
-    // Rule 2: everything the block's transactions changed shows up in some diff.
-    let tx_changes = committed
-        .changed_accounts
-        .iter()
-        .filter(|(address, _)| !WRITTEN_OUTSIDE_TRANSACTIONS.contains(address));
-    for (address, slots) in tx_changes {
-        let Some(account) = diffed.get(address) else {
-            let field = format!("{address}");
-            report.record(endpoint, None, field, "changed by the block", "in no state diff");
-            continue;
-        };
-        for slot in slots.iter().filter(|slot| !account.storage.contains_key(*slot)) {
-            let expected = committed.post_storage(address, slot);
-            let field = format!("{address} slot {slot}");
-            report.record(endpoint, None, field, expected, "in no state diff");
+    // Rule 2: every field the block changed is revealed by some diff, unless the chain wrote
+    // it outside the block's transactions. A diff that says "unchanged" reveals nothing.
+    let nothing_revealed = DiffedAccount::default();
+    for (address, changed) in &committed.changed_accounts {
+        let revealed = diffed.get(address).unwrap_or(&nothing_revealed);
+        let post = committed.post_account(address);
+        let written_by_transactions =
+            |field| !committed.outside_writes.contains(&(*address, field));
+        let mut unrevealed = Vec::new();
+        if changed.pre.balance != post.balance &&
+            written_by_transactions(Field::Balance) &&
+            revealed.balance.is_none()
+        {
+            unrevealed.push(("balance".to_string(), post.balance.to_string()));
+        }
+        if changed.pre.nonce != post.nonce &&
+            written_by_transactions(Field::Nonce) &&
+            revealed.nonce.is_none()
+        {
+            unrevealed.push(("nonce".to_string(), post.nonce.to_string()));
+        }
+        if changed.pre.get_bytecode_hash() != post.code_hash &&
+            written_by_transactions(Field::Code) &&
+            revealed.code.is_none()
+        {
+            unrevealed.push(("code hash".to_string(), post.code_hash.to_string()));
+        }
+        if written_by_transactions(Field::Storage) {
+            for slot in changed.slots.iter().filter(|slot| !revealed.storage.contains_key(*slot)) {
+                let value = committed.post_storage(address, slot);
+                unrevealed.push((format!("slot {slot}"), value.to_string()));
+            }
+        }
+        for (field, expected) in unrevealed {
+            let field = format!("{address} {field}");
+            report.record(endpoint, None, field, expected, "not revealed by any state diff");
         }
     }
+}
+
+/// Account fields the chain writes outside the block's transactions, so no per-transaction
+/// state diff can reveal them. Each write is scoped to the blocks that make it.
+fn written_outside_transactions(phase: Phase, epoch_changed: bool) -> Vec<(Address, Field)> {
+    let mut writes = Vec::new();
+    // `eip_2935::apply_state_changes_for_block` deploys the block hash contract (nonce 1,
+    // code) before the first transaction of the Prague activation block.
+    if phase == Phase::Activation(Fork::Prague) {
+        writes.extend([
+            (HISTORY_STORAGE_ADDRESS, Field::Nonce),
+            (HISTORY_STORAGE_ADDRESS, Field::Code),
+        ]);
+    }
+    // From then on the executor's pre-execution system call stores the parent id in the block
+    // hash contract. An epoch-change block is assembled from its system transactions alone and
+    // never runs the executor, so it writes no slot.
+    if phase.has_activated(Fork::Prague) && !epoch_changed {
+        writes.push((HISTORY_STORAGE_ADDRESS, Field::Storage));
+    }
+    // A pre-Alpha DKG epoch-change block executes `onBlockStart`, which updates the global
+    // time, but keeps only the DKG transaction in its body.
+    if epoch_changed && !phase.has_activated(Fork::Alpha) {
+        writes.push((TIMESTAMP_ADDR, Field::Storage));
+    }
+    // `system_caller_migration` zeroes SYSTEM_CALLER's balance before the first transaction
+    // of the Alpha activation block; its gas-exempt transactions leave it unchanged.
+    if phase == Phase::Activation(Fork::Alpha) {
+        writes.push((SYSTEM_CALLER, Field::Balance));
+    }
+    // The Gamma hook replaces two oracle runtimes after the last transaction of the first
+    // executed block at or after gammaTime, which is the activation block: activation blocks
+    // never change epoch.
+    if phase == Phase::Activation(Fork::Gamma) {
+        writes.extend([(NATIVE_ORACLE_ADDR, Field::Code), (ORACLE_TASK_CONFIG_ADDR, Field::Code)]);
+    }
+    writes
 }
 
 /// Opcode gas excludes intrinsic gas and refunds, so only the transaction list is

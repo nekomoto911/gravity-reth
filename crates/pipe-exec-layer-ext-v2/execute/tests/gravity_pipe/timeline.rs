@@ -87,6 +87,16 @@ pub(crate) enum Phase {
     After(Fork),
 }
 
+impl Phase {
+    /// Whether `fork` is active in a block of this phase.
+    pub(crate) fn has_activated(self, fork: Fork) -> bool {
+        match self {
+            Self::Genesis => false,
+            Self::Activation(latest) | Self::After(latest) => latest >= fork,
+        }
+    }
+}
+
 impl fmt::Display for Phase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
