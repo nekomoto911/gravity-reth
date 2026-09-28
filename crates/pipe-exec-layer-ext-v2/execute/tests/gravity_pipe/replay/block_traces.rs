@@ -38,6 +38,16 @@ pub(super) fn check_parity_traces(
     response: Result<Vec<LocalizedTransactionTrace>, String>,
 ) {
     let Some(traces) = result_or_record(report, endpoint, None, response) else { return };
+    check_parity_roots(report, endpoint, committed, &traces);
+}
+
+/// `traces` are the parity traces an endpoint reported for the committed block.
+pub(super) fn check_parity_roots(
+    report: &mut BlockReport<'_>,
+    endpoint: &'static str,
+    committed: &Committed,
+    traces: &[LocalizedTransactionTrace],
+) {
     let roots: Vec<_> = traces
         .iter()
         .filter(|trace| {

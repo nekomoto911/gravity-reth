@@ -2,7 +2,7 @@
 //! ordered blocks the way gravity-sdk does, and commits them one at a time.
 
 use alloy_eips::BlockId;
-use alloy_primitives::{keccak256, Address, TxKind, B256, U256};
+use alloy_primitives::{keccak256, Address, TxKind, B256};
 use alloy_rpc_types_eth::{state::EvmOverrides, TransactionInput, TransactionRequest};
 use alloy_sol_types::SolCall;
 use gravity_api_types::{
@@ -22,7 +22,7 @@ use reth_ethereum_primitives::TransactionSigned;
 use reth_node_builder::{NodeBuilder, WithLaunchContext};
 use reth_pipe_exec_layer_ext_v2::{
     onchain_config::{types::getActiveValidatorsCall, VALIDATOR_MANAGER_ADDR},
-    ExecutionResult, OrderedBlock, PipeExecLayerApi,
+    OrderedBlock, PipeExecLayerApi,
 };
 use reth_rpc_eth_api::{helpers::EthCall, RpcTypes};
 use reth_tracing::{
@@ -98,7 +98,8 @@ pub(crate) struct CommittedBlock {
     pub(crate) number: u64,
     /// Seconds, as in the header.
     pub(crate) timestamp: u64,
-    pub(crate) result: ExecutionResult,
+    /// Microseconds, as passed to `onBlockStart`; the header keeps only seconds.
+    pub(crate) timestamp_us: u64,
     pub(crate) epoch_changed: bool,
 }
 
@@ -208,7 +209,7 @@ where
         self.parent_number = number;
         self.parent_id = id;
         self.parent_timestamp = timestamp;
-        CommittedBlock { number, timestamp, result, epoch_changed }
+        CommittedBlock { number, timestamp, timestamp_us: input.timestamp_us, epoch_changed }
     }
 
     /// gravity-sdk's DKG transcript. The pipe only forwards the bytes to

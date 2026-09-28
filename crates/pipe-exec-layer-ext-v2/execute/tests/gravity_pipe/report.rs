@@ -15,8 +15,14 @@ pub(crate) struct MismatchReport {
 
 impl MismatchReport {
     /// Scopes recording to one committed block.
-    pub(crate) const fn for_block(&mut self, block: u64, phase: Phase) -> BlockReport<'_> {
-        BlockReport { report: self, block, phase }
+    pub(crate) const fn for_block(&mut self, number: u64, phase: Phase) -> BlockReport<'_> {
+        BlockReport { report: self, scope: Scope::Block { number, phase } }
+    }
+
+    /// Scopes recording to a range of committed blocks, for endpoints that replay several
+    /// blocks in one call.
+    pub(crate) const fn for_blocks(&mut self, first: u64, last: u64) -> BlockReport<'_> {
+        BlockReport { report: self, scope: Scope::Blocks { first, last } }
     }
 
     pub(crate) const fn len(&self) -> usize {
@@ -36,8 +42,7 @@ impl MismatchReport {
 /// One value the node reported that differs from the committed result.
 #[derive(Debug)]
 pub(crate) struct Mismatch {
-    pub(crate) block: u64,
-    pub(crate) phase: Phase,
+    pub(crate) scope: Scope,
     /// RPC endpoint or scenario that produced the value.
     pub(crate) source: &'static str,
     pub(crate) tx_index: Option<usize>,
@@ -48,8 +53,11 @@ pub(crate) struct Mismatch {
 
 impl Display for Mismatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self { block, phase, source, tx_index, field, expected, actual } = self;
-        write!(f, "block {block} ({phase}) {source}")?;
+        let Self { scope, source, tx_index, field, expected, actual } = self;
+        match scope {
+            Scope::Block { number, phase } => write!(f, "block {number} ({phase}) {source}")?,
+            Scope::Blocks { first, last } => write!(f, "blocks {first}..={last} {source}")?,
+        }
         if let Some(index) = tx_index {
             write!(f, " tx {index}")?;
         }
@@ -57,11 +65,17 @@ impl Display for Mismatch {
     }
 }
 
-/// Records mismatches of one committed block.
+/// The committed blocks a mismatch is about.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Scope {
+    Block { number: u64, phase: Phase },
+    Blocks { first: u64, last: u64 },
+}
+
+/// Records mismatches of one committed block, or of a range of them.
 pub(crate) struct BlockReport<'a> {
     report: &'a mut MismatchReport,
-    block: u64,
-    phase: Phase,
+    scope: Scope,
 }
 
 impl BlockReport<'_> {
@@ -74,8 +88,7 @@ impl BlockReport<'_> {
         actual: impl Display,
     ) {
         self.report.mismatches.push(Mismatch {
-            block: self.block,
-            phase: self.phase,
+            scope: self.scope,
             source,
             tx_index,
             field: field.into(),

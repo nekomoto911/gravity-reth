@@ -83,6 +83,7 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
     // Step 2: produce blocks until the last phase has changed epoch, or the schedule
     // runs out; replay each block right after it is committed.
     let mut epoch_changes: Vec<(u64, Phase)> = Vec::new();
+    let mut blocks = Vec::new();
     let mut report = MismatchReport::default();
     loop {
         tokio::time::sleep(BLOCK_INTERVAL).await;
@@ -124,9 +125,10 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
             report.len(),
         );
 
-        if phase == Phase::After(Fork::Gamma) && block.epoch_changed ||
-            block.timestamp >= timeline.deadline()
-        {
+        let done = phase == Phase::After(Fork::Gamma) && block.epoch_changed ||
+            block.timestamp >= timeline.deadline();
+        blocks.push((block, phase));
+        if done {
             break;
         }
     }
@@ -146,7 +148,10 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
         epoch_changes.len()
     );
 
-    // Step 4: every replay reproduced the committed blocks.
+    // Step 4: replays spanning many blocks reproduce them too.
+    tokio::task::block_in_place(|| replay::check_blocks(&provider, &rpc, &blocks, &mut report));
+
+    // Step 5: every replay reproduced the committed blocks.
     report.assert_empty();
     Ok(())
 }

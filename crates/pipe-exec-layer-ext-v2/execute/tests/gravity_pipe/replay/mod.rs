@@ -4,30 +4,40 @@
 //! committed. The committed result is read back from the node's storage (header,
 //! receipts, changesets, historical state); the endpoints are called over HTTP, as on a
 //! mainnet RPC node. Any difference, including an endpoint error, is recorded and the
-//! timeline continues.
+//! timeline continues. Endpoints that replay several blocks in one call are checked once the
+//! timeline is done (`check_blocks`).
 
+mod block_execution;
 mod block_traces;
 mod committed;
 mod contract_creator;
+mod cross_block;
 mod intermediate_roots;
+mod mid_block;
+mod revealed_state;
 mod state_diff;
 mod transaction;
+
+pub(crate) use cross_block::check_blocks;
 
 use crate::{node::CommittedBlock, report::BlockReport, rpc::RpcClient, timeline::Phase};
 use alloy_primitives::{Bytes, B256, U256};
 use alloy_rpc_types_trace::geth::CallFrame;
+use block_execution::check_block_execution;
 use block_traces::{check_call_traces, check_opcode_gas, check_parity_traces};
 use committed::Committed;
 use contract_creator::check_contract_creators;
 use intermediate_roots::check_intermediate_roots;
+use mid_block::check_mid_block;
 use reth_ethereum_primitives::{Block, Receipt};
 use reth_provider::{BlockReader, ChangeSetReader, StateProviderFactory, StorageChangeSetReader};
 use serde_json::{json, Value};
 use state_diff::check_replayed_transactions;
 use transaction::check_transaction;
 
-/// Replays a committed block through every replay endpoint, whole-block and per
-/// transaction, and records each difference from the committed result.
+/// Replays a committed block through every single-block replay endpoint, whole-block, per
+/// transaction and stopping inside the block, and records each difference from the committed
+/// result.
 pub(crate) fn check_block<P>(
     provider: &P,
     rpc: &RpcClient,
@@ -79,6 +89,13 @@ pub(crate) fn check_block<P>(
 
     // Step 5: every contract the block created names its creating transaction.
     check_contract_creators(report, rpc, &committed);
+
+    // Step 6: replays that stop inside the block see the committed state at that position.
+    check_mid_block(report, rpc, &committed);
+
+    // Step 7: the block executed as a unit reproduces everything it committed, and no block
+    // has an execution witness.
+    check_block_execution(report, rpc, &committed);
 }
 
 /// Geth-style traces use the call tracer: its root frame carries the transaction's gas
