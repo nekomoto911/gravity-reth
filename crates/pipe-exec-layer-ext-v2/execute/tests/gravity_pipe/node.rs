@@ -49,7 +49,7 @@ const OLD_EPOCH_BLOCK_WAIT: Duration = Duration::from_secs(3);
 /// Twice mainnet's minimum base fee (50 gwei), which empty test blocks never raise much.
 pub(crate) const MAX_FEE_PER_GAS: u128 = 100_000_000_000;
 const MAX_PRIORITY_FEE_PER_GAS: u128 = 1_000_000_000;
-const TRANSFER_GAS: u64 = 21_000;
+pub(crate) const TRANSFER_GAS: u64 = 21_000;
 
 /// `GBridgeSender` on Ethereum: the only sender `GBridgeReceiver` mints for.
 const ETHEREUM_BRIDGE: Address = address!("0xE82c61Ac9Ec2041b493118051afa4F18a55dC876");

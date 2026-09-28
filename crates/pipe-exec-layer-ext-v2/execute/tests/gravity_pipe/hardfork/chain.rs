@@ -2,6 +2,7 @@
 //!
 //! These are state, block and receipt lookups, not replays: they return what the pipe
 //! committed. A failed read means the harness cannot see the chain at all, so it panics.
+//! Scenarios that check how an endpoint answers, error included, use [`Chain::request`].
 
 use crate::rpc::RpcClient;
 use alloy_primitives::{Address, Bytes, B256, U256, U64};
@@ -71,6 +72,16 @@ impl<'a> Chain<'a> {
             Err(error) if is_revert(&error) => None,
             Err(error) => panic!("eth_call {params} failed: {error}"),
         }
+    }
+
+    /// Calls an endpoint whose error is an answer the scenario checks, not a failed read:
+    /// simulations and replays.
+    pub(crate) fn request<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<T, String> {
+        self.rpc.call(method, params)
     }
 
     fn read<T: DeserializeOwned>(&self, method: &str, params: Value) -> T {

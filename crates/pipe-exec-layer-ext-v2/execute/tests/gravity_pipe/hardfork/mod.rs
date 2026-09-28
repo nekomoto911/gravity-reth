@@ -44,6 +44,7 @@ impl ScenarioBlock {
 #[derive(Debug, Default)]
 pub(crate) struct Scenarios {
     prague: prague::Prague,
+    alpha: alpha::Alpha,
     base: base::Base,
 }
 
@@ -58,7 +59,10 @@ impl Scenarios {
     ) -> Option<ScenarioBlock> {
         // Hardfork modules come first: their phases are short, while base scenarios can take
         // any block before Alpha.
-        self.prague.next_block(phase, parent).or_else(|| self.base.next_block(chain, phase, parent))
+        self.prague
+            .next_block(phase, parent)
+            .or_else(|| self.alpha.next_block(chain, phase, parent))
+            .or_else(|| self.base.next_block(chain, phase, parent))
     }
 
     /// Asserts what `block` must show, now that it is committed.
@@ -69,12 +73,14 @@ impl Scenarios {
         report: &mut BlockReport<'_>,
     ) {
         self.prague.after_commit(chain, block, report);
+        self.alpha.after_commit(chain, block, report);
         self.base.after_commit(chain, block, report);
     }
 
     /// Panics if a scenario never got its block: the phase it needs ended first.
     pub(crate) fn assert_all_ran(&self) {
         self.prague.assert_all_ran();
+        self.alpha.assert_all_ran();
         self.base.assert_all_ran();
     }
 }

@@ -45,7 +45,7 @@ const SCENARIO_BLOCKS: [PlanFn; 4] = [
 ];
 
 /// A public key and its proof of possession; the precompile returns true for them.
-const VALID_BLS_POP_INPUT: [u8; 144] = hex!(
+pub(super) const VALID_BLS_POP_INPUT: [u8; 144] = hex!(
     "8ae7e5822ba97ab07877ea318e747499da648b27302414f9d0b9bb7e3646d248"
     "be90c9fdaddfdb93485a6e9334f01093"
     "b16db5b947dda6c513b24b8724b659996826bfb69a8914f1b295e39572f40923"
@@ -53,7 +53,7 @@ const VALID_BLS_POP_INPUT: [u8; 144] = hex!(
     "ab03b99601738c4179746e73913388b68285a854e85be32b1539ec925dd3d7fe"
 );
 /// Leaves the precompile well over its flat 110 000 gas.
-const BLS_ENOUGH_GAS: u64 = 200_000;
+pub(super) const BLS_ENOUGH_GAS: u64 = 200_000;
 /// Above the intrinsic gas, so the transaction is executed, but after it less than the
 /// precompile's flat charge is left: the call runs out of gas inside the precompile.
 const BLS_TOO_LITTLE_GAS: u64 = 100_000;
