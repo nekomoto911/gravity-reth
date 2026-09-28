@@ -784,6 +784,12 @@ mod tests {
     fn test_state_root() {
         reth_tracing::init_test_tracing();
 
+        // Payload tasks run on this test-owned runtime; dropping it at the end of the test
+        // waits for every spawned blocking task, so the last database handle is released
+        // (and RocksDB closed) before the test returns instead of racing process exit.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _enter = runtime.enter();
+
         let factory = create_test_provider_factory_with_chain_spec(Arc::new(ChainSpec::default()));
         let genesis_hash = init_genesis(&factory).unwrap();
 
