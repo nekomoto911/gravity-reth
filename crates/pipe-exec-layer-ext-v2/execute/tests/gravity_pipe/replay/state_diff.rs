@@ -17,7 +17,7 @@ pub(super) fn check_replayed_transactions(
     committed: &Committed,
     response: Result<Vec<TraceResultsWithTransactionHash>, String>,
 ) {
-    let Some(replays) = result_or_record(report, endpoint, response) else { return };
+    let Some(replays) = result_or_record(report, endpoint, None, response) else { return };
     let hashes: Vec<_> = replays.iter().map(|replay| Some(replay.transaction_hash)).collect();
     check_tx_hashes(report, endpoint, committed, &hashes);
 

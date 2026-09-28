@@ -1,8 +1,7 @@
 //! Whole-block traces: each transaction's trace must match its committed receipt.
 
-use super::{check_tx_hashes, committed::Committed, result_or_record};
+use super::{check_call_frame, check_tx_hashes, committed::Committed, result_or_record};
 use crate::report::BlockReport;
-use alloy_primitives::U256;
 use alloy_rpc_types_trace::{
     common::TraceResult, geth::CallFrame, opcode::BlockOpcodeGas, parity::LocalizedTransactionTrace,
 };
@@ -13,17 +12,14 @@ pub(super) fn check_call_traces(
     committed: &Committed,
     response: Result<Vec<TraceResult<CallFrame, String>>, String>,
 ) {
-    let Some(traces) = result_or_record(report, endpoint, response) else { return };
+    let Some(traces) = result_or_record(report, endpoint, None, response) else { return };
     let hashes: Vec<_> = traces.iter().map(TraceResult::tx_hash).collect();
     check_tx_hashes(report, endpoint, committed, &hashes);
 
-    for (index, (trace, receipt)) in traces.iter().zip(&committed.receipts).enumerate() {
+    for (index, trace) in traces.iter().take(committed.receipts.len()).enumerate() {
         match trace {
             TraceResult::Success { result, .. } => {
-                let gas_used = U256::from(committed.gas_used(index));
-                report.check_eq(endpoint, Some(index), "gas used", gas_used, result.gas_used);
-                let success = result.error.is_none();
-                report.check_eq(endpoint, Some(index), "success", receipt.success, success);
+                check_call_frame(report, endpoint, committed, index, result)
             }
             TraceResult::Error { error, .. } => {
                 report.record(endpoint, Some(index), "trace", "a trace", error)
@@ -41,7 +37,7 @@ pub(super) fn check_parity_traces(
     committed: &Committed,
     response: Result<Vec<LocalizedTransactionTrace>, String>,
 ) {
-    let Some(traces) = result_or_record(report, endpoint, response) else { return };
+    let Some(traces) = result_or_record(report, endpoint, None, response) else { return };
     let roots: Vec<_> = traces
         .iter()
         .filter(|trace| {
@@ -65,7 +61,7 @@ pub(super) fn check_opcode_gas(
     committed: &Committed,
     response: Result<Option<BlockOpcodeGas>, String>,
 ) {
-    let Some(opcode_gas) = result_or_record(report, endpoint, response) else { return };
+    let Some(opcode_gas) = result_or_record(report, endpoint, None, response) else { return };
     let Some(opcode_gas) = opcode_gas else {
         report.record(endpoint, None, "response", "a block", "null");
         return;

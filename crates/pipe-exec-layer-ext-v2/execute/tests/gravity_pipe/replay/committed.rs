@@ -6,7 +6,7 @@ use crate::{
     timeline::{Fork, Phase},
 };
 use alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS;
-use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, KECCAK256_EMPTY, U256};
 use reth_ethereum_primitives::{Block, Receipt};
 use reth_pipe_exec_layer_ext_v2::onchain_config::{
     NATIVE_ORACLE_ADDR, ORACLE_TASK_CONFIG_ADDR, SYSTEM_CALLER, TIMESTAMP_ADDR,
@@ -105,6 +105,27 @@ impl Committed {
 
     pub(super) fn post_storage(&self, address: &Address, slot: &B256) -> B256 {
         self.post_state.storage(*address, *slot).unwrap().unwrap_or_default().into()
+    }
+
+    /// Contracts the block's transactions created: accounts that had no code before the
+    /// block and hold a contract after it. An EIP-7702 delegation designator also gives an
+    /// account code but creates no contract, and code the chain installs outside
+    /// transactions has no creating transaction.
+    pub(super) fn created_contracts(&self) -> Vec<Address> {
+        self.changed_accounts
+            .iter()
+            .filter(|(address, changed)| {
+                changed.pre.get_bytecode_hash() == KECCAK256_EMPTY &&
+                    !self.outside_writes.contains(&(**address, Field::Code))
+            })
+            .filter(|(address, _)| {
+                self.post_state
+                    .account_code(address)
+                    .unwrap()
+                    .is_some_and(|code| !code.original_bytes().is_empty() && !code.is_eip7702())
+            })
+            .map(|(address, _)| *address)
+            .collect()
     }
 }
 
