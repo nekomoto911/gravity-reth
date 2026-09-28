@@ -4,6 +4,7 @@
 //! the real time at which they are built, so a block activates a fork when
 //! `parent_ts < fork_time <= block_ts`, never by block number.
 
+use crate::node::TestAccount;
 use alloy_primitives::{address, Address, B256, U256};
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardfork, GravityHardfork, Hardforks};
 use std::{
@@ -19,10 +20,10 @@ const MAINNET_GENESIS: &str = include_str!("mainnet_genesis.json");
 /// Each phase must be long enough to see at least one epoch change (one epoch interval
 /// plus the block that delivers the DKG transcript) besides its own scenario blocks.
 const FORK_OFFSETS: [(Fork, Duration); 4] = [
-    (Fork::Prague, Duration::from_secs(15)),
-    (Fork::Alpha, Duration::from_secs(30)),
-    (Fork::Beta, Duration::from_secs(45)),
-    (Fork::Gamma, Duration::from_secs(60)),
+    (Fork::Prague, Duration::from_secs(25)),
+    (Fork::Alpha, Duration::from_secs(40)),
+    (Fork::Beta, Duration::from_secs(55)),
+    (Fork::Gamma, Duration::from_secs(70)),
 ];
 
 /// Mainnet reconfigures every 2 hours; the test shortens it so that epoch changes
@@ -37,6 +38,9 @@ const LAST_PHASE_BUDGET: Duration = Duration::from_secs(60);
 const EPOCH_CONFIG_ADDR: Address = address!("00000000000000000000000000000001625f1005");
 const EPOCH_CONFIG_INITIALIZED_BIT: usize = 136;
 const MAINNET_EPOCH_INTERVAL: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// 10^6 ether per test account: a transaction's worst case (30M gas at 100 gwei) costs 3 ether.
+const TEST_ACCOUNT_BALANCE_WEI: u128 = 1_000_000 * 10u128.pow(18);
 
 /// Hardforks the test chain walks through, in activation order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -124,7 +128,7 @@ impl Timeline {
         Self { forks }
     }
 
-    /// Mainnet genesis with the test's hardfork times and epoch interval.
+    /// Mainnet genesis with the test's hardfork times, epoch interval and funded accounts.
     pub(crate) fn genesis_json(&self) -> String {
         let mut genesis: serde_json::Value = serde_json::from_str(MAINNET_GENESIS).unwrap();
 
@@ -140,6 +144,13 @@ impl Timeline {
             "EpochConfig slot 0 no longer has the layout this test rewrites"
         );
         *slot = serde_json::json!(B256::from(epoch_config_slot(EPOCH_INTERVAL)));
+
+        // Mainnet genesis funds no ordinary account, so user transactions need their own.
+        for account in TestAccount::FUNDED {
+            let entry = &mut genesis["alloc"][format!("{:#x}", account.address())];
+            assert!(entry.is_null(), "{account:?} collides with a mainnet genesis account");
+            *entry = serde_json::json!({ "balance": format!("{TEST_ACCOUNT_BALANCE_WEI:#x}") });
+        }
 
         genesis.to_string()
     }

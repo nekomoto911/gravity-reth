@@ -1,15 +1,24 @@
 //! Test node and mock consensus: launches reth with the pipe execution layer, builds
 //! ordered blocks the way gravity-sdk does, and commits them one at a time.
 
-use alloy_eips::BlockId;
-use alloy_primitives::{keccak256, Address, TxKind, B256};
+use alloy_consensus::{SignableTransaction, TxEip1559, TxLegacy};
+use alloy_eips::{
+    eip7702::{Authorization, SignedAuthorization},
+    BlockId,
+};
+use alloy_primitives::{address, keccak256, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_rpc_types_eth::{state::EvmOverrides, TransactionInput, TransactionRequest};
-use alloy_sol_types::SolCall;
+use alloy_signer::SignerSync;
+use alloy_signer_local::PrivateKeySigner;
+use alloy_sol_types::{SolCall, SolValue};
 use gravity_api_types::{
     account::ExternalAccountAddress,
     config_storage::{BlockNumber, ConfigStorage, OnChainConfig},
     events::contract_event::GravityEvent,
-    on_chain_config::dkg::{DKGTranscript, DKGTranscriptMetadata},
+    on_chain_config::{
+        dkg::{DKGTranscript, DKGTranscriptMetadata},
+        jwks::{JWKStruct, ProviderJWKs},
+    },
     ExtraDataType,
 };
 use gravity_storage::GravityStorage;
@@ -18,7 +27,7 @@ use reth_cli_commands::{launcher::FnLauncher, NodeCommand};
 use reth_cli_runner::CliRunner;
 use reth_db::DatabaseEnv;
 use reth_ethereum_cli::chainspec::EthereumChainSpecParser;
-use reth_ethereum_primitives::TransactionSigned;
+use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use reth_node_builder::{NodeBuilder, WithLaunchContext};
 use reth_pipe_exec_layer_ext_v2::{
     onchain_config::{types::getActiveValidatorsCall, VALIDATOR_MANAGER_ADDR},
@@ -32,6 +41,23 @@ use std::{future::Future, io::ErrorKind, sync::Arc, time::Duration};
 
 /// Mainnet runs 7 validators; `onBlockStart` reverts for a proposer index outside `0..7`.
 const PROPOSER_INDEX: u64 = 0;
+
+/// The pipe gives up on a block whose parent never arrives after 2 s; a stale block is
+/// discarded then, so waiting a little longer shows it was never executed.
+const OLD_EPOCH_BLOCK_WAIT: Duration = Duration::from_secs(3);
+
+/// Twice mainnet's minimum base fee (50 gwei), which empty test blocks never raise much.
+pub(crate) const MAX_FEE_PER_GAS: u128 = 100_000_000_000;
+const MAX_PRIORITY_FEE_PER_GAS: u128 = 1_000_000_000;
+const TRANSFER_GAS: u64 = 21_000;
+
+/// `GBridgeSender` on Ethereum: the only sender `GBridgeReceiver` mints for.
+const ETHEREUM_BRIDGE: Address = address!("0xE82c61Ac9Ec2041b493118051afa4F18a55dC876");
+/// Oracle source of the bridge: source type 0 (blockchain events), source id 1 (Ethereum),
+/// the one `GBridgeReceiver` is registered for.
+const BRIDGE_ORACLE_SOURCE: &[u8] = b"gravity://0/1/events";
+/// The JWK type the pipe routes to `NativeOracle.recordBatch`.
+const UNSUPPORTED_JWK_TYPE: &str = "0x1::jwks::Unsupported_JWK";
 
 pub(crate) type Builder = WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, ChainSpec>>;
 
@@ -96,10 +122,16 @@ pub(crate) struct BlockInput {
 #[derive(Debug)]
 pub(crate) struct CommittedBlock {
     pub(crate) number: u64,
+    /// gravity-sdk block id of the parent.
+    pub(crate) parent_id: B256,
+    /// Block hash the pipe reported for this block.
+    pub(crate) hash: B256,
     /// Seconds, as in the header.
     pub(crate) timestamp: u64,
     /// Microseconds, as passed to `onBlockStart`; the header keeps only seconds.
     pub(crate) timestamp_us: u64,
+    /// Epoch after this block.
+    pub(crate) epoch: u64,
     pub(crate) epoch_changed: bool,
 }
 
@@ -146,37 +178,24 @@ where
         }
     }
 
+    /// Number of the last committed block.
+    pub(crate) const fn parent_number(&self) -> u64 {
+        self.parent_number
+    }
+
     /// Timestamp of the last committed block, in seconds.
     pub(crate) fn parent_timestamp(&self) -> u64 {
         self.parent_timestamp
     }
 
-    pub(crate) async fn produce_block(&mut self, input: BlockInput) -> CommittedBlock {
+    pub(crate) async fn produce_block(&mut self, mut input: BlockInput) -> CommittedBlock {
         // Step 1: build the ordered block, delivering a pending DKG transcript if allowed.
-        let number = self.parent_number + 1;
-        let id = mock_block_id(number);
-        let randomness = keccak256(number.to_be_bytes());
-        let mut extra_data = input.extra_data;
         let delivers_transcript = self.dkg_in_progress && input.may_change_epoch;
         if delivers_transcript {
-            extra_data.push(self.dkg_transcript());
+            input.extra_data.push(self.dkg_transcript());
         }
-        let block = OrderedBlock {
-            epoch: self.epoch,
-            parent_id: self.parent_id,
-            id,
-            number,
-            timestamp_us: input.timestamp_us,
-            coinbase: self.coinbase,
-            prev_randao: randomness,
-            withdrawals: Default::default(),
-            transactions: input.transactions,
-            senders: input.senders,
-            proposer_index: Some(PROPOSER_INDEX),
-            failed_proposer_indices: vec![],
-            extra_data,
-            randomness: randomness.into(),
-        };
+        let block = self.next_ordered_block(input);
+        let (number, id, timestamp_us) = (block.number, block.id, block.timestamp_us);
 
         // Step 2: execute, commit, and wait until the block is in the database, so that
         // RPC replays read persisted history like a mainnet RPC node does.
@@ -205,11 +224,68 @@ where
             "block {number}: a delivered DKG transcript must change the epoch, and only it"
         );
 
-        let timestamp = input.timestamp_us / 1_000_000;
+        let committed = CommittedBlock {
+            number,
+            parent_id: self.parent_id,
+            hash: result.block_hash,
+            timestamp: timestamp_us / 1_000_000,
+            timestamp_us,
+            epoch: self.epoch,
+            epoch_changed,
+        };
         self.parent_number = number;
         self.parent_id = id;
-        self.parent_timestamp = timestamp;
-        CommittedBlock { number, timestamp, timestamp_us: input.timestamp_us, epoch_changed }
+        self.parent_timestamp = committed.timestamp;
+        committed
+    }
+
+    /// Pushes a block that still carries the epoch before the last epoch change, and asserts
+    /// that the pipe never executes it.
+    ///
+    /// The epoch-change block released its successor under the new epoch, so a block of the
+    /// old epoch times out waiting for its parent and is discarded as stale. Executing it
+    /// would take the height of the next real block, so the timeline could not continue: a
+    /// result panics instead of being recorded.
+    pub(crate) async fn assert_old_epoch_block_rejected(&self) {
+        let block = OrderedBlock {
+            epoch: self.epoch - 1,
+            // Distinct from the id of the real block at this height, so neither can be taken
+            // for the other.
+            id: keccak256(b"gravity_pipe old-epoch block"),
+            ..self.next_ordered_block(BlockInput {
+                timestamp_us: (self.parent_timestamp + 1) * 1_000_000,
+                ..Default::default()
+            })
+        };
+        let number = block.number;
+        self.pipe.push_ordered_block(block).unwrap();
+        let result =
+            tokio::time::timeout(OLD_EPOCH_BLOCK_WAIT, self.pipe.pull_executed_block_hash()).await;
+        if let Ok(result) = result {
+            panic!("block {number} of the previous epoch was executed: {result:?}");
+        }
+    }
+
+    /// The ordered block gravity-sdk would send next, on top of the last committed block.
+    fn next_ordered_block(&self, input: BlockInput) -> OrderedBlock {
+        let number = self.parent_number + 1;
+        let randomness = keccak256(number.to_be_bytes());
+        OrderedBlock {
+            epoch: self.epoch,
+            parent_id: self.parent_id,
+            id: mock_block_id(number),
+            number,
+            timestamp_us: input.timestamp_us,
+            coinbase: self.coinbase,
+            prev_randao: randomness,
+            withdrawals: Default::default(),
+            transactions: input.transactions,
+            senders: input.senders,
+            proposer_index: Some(PROPOSER_INDEX),
+            failed_proposer_indices: vec![],
+            extra_data: input.extra_data,
+            randomness: randomness.into(),
+        }
     }
 
     /// gravity-sdk's DKG transcript. The pipe only forwards the bytes to
@@ -223,6 +299,139 @@ where
             transcript_bytes: vec![0xab; 32],
         };
         ExtraDataType::DKG(bcs::to_bytes(&transcript).unwrap())
+    }
+}
+
+/// Accounts the test signs user transactions for. Keys derive from fixed seeds, so every
+/// run signs the same transactions; all but `Unfunded` are funded in genesis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TestAccount {
+    Alice,
+    Bob,
+    Carol,
+    Dave,
+    /// Never funded, so it stays absent from state and cannot pay for anything.
+    Unfunded,
+}
+
+impl TestAccount {
+    pub(crate) const FUNDED: [Self; 4] = [Self::Alice, Self::Bob, Self::Carol, Self::Dave];
+
+    pub(crate) fn address(self) -> Address {
+        self.signer().address()
+    }
+
+    /// Signs `tx` as given, so scenarios can also build transactions the pipe must reject.
+    pub(crate) fn sign<T>(self, tx: T) -> SignedTx
+    where
+        T: SignableTransaction<Signature>,
+        Transaction: From<T>,
+    {
+        let signature = self.signer().sign_hash_sync(&tx.signature_hash()).unwrap();
+        SignedTx {
+            tx: TransactionSigned::new_unhashed(tx.into(), signature),
+            sender: self.address(),
+        }
+    }
+
+    /// An EIP-7702 authorization delegating this account's code to `delegate`.
+    pub(crate) fn authorize(
+        self,
+        chain_id: u64,
+        delegate: Address,
+        nonce: u64,
+    ) -> SignedAuthorization {
+        let authorization =
+            Authorization { chain_id: U256::from(chain_id), address: delegate, nonce };
+        let signature = self.signer().sign_hash_sync(&authorization.signature_hash()).unwrap();
+        authorization.into_signed(signature)
+    }
+
+    fn signer(self) -> PrivateKeySigner {
+        let seed = keccak256(format!("gravity_pipe test account {self:?}"));
+        PrivateKeySigner::from_bytes(&seed).unwrap()
+    }
+}
+
+/// A user transaction together with the sender gravity-sdk recovers for it.
+#[derive(Debug, Clone)]
+pub(crate) struct SignedTx {
+    pub(crate) tx: TransactionSigned,
+    pub(crate) sender: Address,
+}
+
+impl SignedTx {
+    pub(crate) fn hash(&self) -> B256 {
+        *self.tx.hash()
+    }
+}
+
+/// An EIP-1559 transfer of nothing to `to`, with 21 000 gas and fees that clear mainnet's
+/// minimum base fee. Scenarios override the fields they care about.
+pub(crate) fn eip1559_tx(chain_id: u64, nonce: u64, to: TxKind) -> TxEip1559 {
+    TxEip1559 {
+        chain_id,
+        nonce,
+        gas_limit: TRANSFER_GAS,
+        max_fee_per_gas: MAX_FEE_PER_GAS,
+        max_priority_fee_per_gas: MAX_PRIORITY_FEE_PER_GAS,
+        to,
+        value: U256::ZERO,
+        access_list: Default::default(),
+        input: Bytes::new(),
+    }
+}
+
+/// The legacy (EIP-155) counterpart of [`eip1559_tx`].
+pub(crate) const fn legacy_tx(chain_id: u64, nonce: u64, to: TxKind) -> TxLegacy {
+    TxLegacy {
+        chain_id: Some(chain_id),
+        nonce,
+        gas_price: MAX_FEE_PER_GAS,
+        gas_limit: TRANSFER_GAS,
+        to,
+        value: U256::ZERO,
+        input: Bytes::new(),
+    }
+}
+
+/// Deposits on the Ethereum bridge, delivered as block extra data the way the relayer's
+/// oracle observations reach the pipe: a JWK entry the pipe turns into a
+/// `NativeOracle.recordBatch` system transaction, whose callback into `GBridgeReceiver` mints
+/// the deposit.
+#[derive(Debug)]
+pub(crate) struct BridgeDeposits {
+    /// `NativeOracle` accepts only the nonce after the last recorded one.
+    next_nonce: u128,
+}
+
+impl Default for BridgeDeposits {
+    fn default() -> Self {
+        // Mainnet genesis has recorded nothing for the bridge source yet.
+        Self { next_nonce: 1 }
+    }
+}
+
+impl BridgeDeposits {
+    /// Extra data minting `amount` wei to `recipient`.
+    pub(crate) fn deposit(&mut self, recipient: Address, amount: U256) -> ExtraDataType {
+        let nonce = self.next_nonce;
+        self.next_nonce += 1;
+
+        // GBridgeSender's message, wrapped in a portal message from the trusted bridge.
+        let message = (amount, recipient).abi_encode_params();
+        let payload = [ETHEREUM_BRIDGE.as_slice(), &nonce.to_be_bytes(), &message].concat();
+
+        // The relayer's canonical wrapper: `(nonce, source position, payload)`. The source
+        // position is the Ethereum block of the deposit; `NativeOracle` only stores it.
+        let data = (nonce, U256::from(nonce), payload.as_slice()).abi_encode();
+        let observation = ProviderJWKs {
+            issuer: BRIDGE_ORACLE_SOURCE.to_vec(),
+            // The pipe does not read the version.
+            version: 1,
+            jwks: vec![JWKStruct { type_name: UNSUPPORTED_JWK_TYPE.to_string(), data }],
+        };
+        ExtraDataType::JWK(bcs::to_bytes(&observation).unwrap())
     }
 }
 

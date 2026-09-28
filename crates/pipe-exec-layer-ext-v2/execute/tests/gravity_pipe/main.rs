@@ -17,6 +17,7 @@ mod rpc;
 mod timeline;
 
 use gravity_storage::block_view_storage::BlockViewStorage;
+use hardfork::{Chain, ScenarioBlock, Scenarios};
 use node::{BlockInput, Builder, Node};
 use report::MismatchReport;
 use reth_node_builder::EngineNodeLauncher;
@@ -79,11 +80,13 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
     );
     args_tx.send(ExecutionArgs { block_number_to_block_id: BTreeMap::new() }).unwrap();
     let mut node = Node::new(pipe, &eth_api, genesis_header.timestamp).await;
+    let chain = Chain::new(&rpc, chain_spec.chain.id());
 
     // Step 2: produce blocks until the last phase has changed epoch, or the schedule
-    // runs out; replay each block right after it is committed.
+    // runs out; replay each block right after it is committed, then check its scenarios.
     let mut epoch_changes: Vec<(u64, Phase)> = Vec::new();
     let mut blocks = Vec::new();
+    let mut scenarios = Scenarios::default();
     let mut report = MismatchReport::default();
     loop {
         tokio::time::sleep(BLOCK_INTERVAL).await;
@@ -91,11 +94,17 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
         let parent_timestamp = node.parent_timestamp();
         let phase = timeline.phase(timestamp_us / 1_000_000, parent_timestamp);
 
+        // An epoch-change block drops user transactions, and mainnet never changed epoch on
+        // an activation block: a pending DKG transcript waits for a block free of both.
+        let scenario = tokio::task::block_in_place(|| {
+            scenarios.next_block(&chain, phase, node.parent_number())
+        });
+        let may_change_epoch = scenario.is_none() && !matches!(phase, Phase::Activation(_));
         let block = node
             .produce_block(BlockInput {
                 timestamp_us,
-                may_change_epoch: !matches!(phase, Phase::Activation(_)),
-                ..Default::default()
+                may_change_epoch,
+                ..scenario.map(ScenarioBlock::into_input).unwrap_or_default()
             })
             .await;
 
@@ -109,13 +118,18 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
             );
         }
         if block.epoch_changed {
+            // The first epoch change also shows that a block of the old epoch is rejected.
+            if epoch_changes.is_empty() {
+                node.assert_old_epoch_block_rejected().await;
+            }
             epoch_changes.push((block.number, phase));
         }
 
         // The RPC client blocks on HTTP while the node serves it from its own runtime.
         tokio::task::block_in_place(|| {
             let mut block_report = report.for_block(block.number, phase);
-            replay::check_block(&provider, &rpc, &block, phase, &mut block_report)
+            replay::check_block(&provider, &rpc, &block, phase, &mut block_report);
+            scenarios.after_commit(&chain, &block, &mut block_report);
         });
         println!(
             "[gravity_pipe] block {} at {} ({phase}){}; {} mismatches so far",
@@ -133,7 +147,9 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
         }
     }
 
-    // Step 3: every phase saw an epoch change, and there were enough of them overall.
+    // Step 3: every scenario got its blocks, every phase saw an epoch change, and there were
+    // enough of them overall.
+    scenarios.assert_all_ran();
     let required_phases =
         std::iter::once(Phase::Genesis).chain(Fork::ALL.into_iter().map(Phase::After));
     for phase in required_phases {
