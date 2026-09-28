@@ -5,18 +5,25 @@
 //! One node starts from mainnet genesis and walks genesis → Prague → Alpha → Beta →
 //! Gamma in wall-clock time. Every block is executed by the pipe (grevm), committed,
 //! and persisted before the next one is built. Epoch changes happen throughout the
-//! timeline, never on a hardfork activation block.
+//! timeline, never on a hardfork activation block. After every block, each RPC endpoint
+//! that replays it must reproduce the committed result; differences are collected and
+//! fail the test once the timeline is done.
 
 mod hardfork;
 mod node;
+mod replay;
+mod report;
+mod rpc;
 mod timeline;
 
 use gravity_storage::block_view_storage::BlockViewStorage;
 use node::{BlockInput, Builder, Node};
+use report::MismatchReport;
 use reth_node_builder::EngineNodeLauncher;
 use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_pipe_exec_layer_ext_v2::{new_pipe_exec_layer_api, ExecutionArgs};
 use reth_provider::{providers::BlockchainProvider, BlockHashReader, HeaderProvider};
+use rpc::RpcClient;
 use std::{
     collections::BTreeMap,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -54,6 +61,9 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
         .await?;
     let chain_spec = handle.node.chain_spec();
     let eth_api = handle.node.rpc_registry.eth_api().clone();
+    let rpc_addr =
+        handle.node.rpc_server_handle().http_local_addr().expect("node runs with --http");
+    let rpc = RpcClient::new(rpc_addr);
     let provider = handle.node.provider;
 
     let genesis_header = provider.header_by_number(0)?.unwrap();
@@ -71,8 +81,9 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
     let mut node = Node::new(pipe, &eth_api, genesis_header.timestamp).await;
 
     // Step 2: produce blocks until the last phase has changed epoch, or the schedule
-    // runs out.
+    // runs out; replay each block right after it is committed.
     let mut epoch_changes: Vec<(u64, Phase)> = Vec::new();
+    let mut report = MismatchReport::default();
     loop {
         tokio::time::sleep(BLOCK_INTERVAL).await;
         let timestamp_us = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as u64;
@@ -99,11 +110,22 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
         if block.epoch_changed {
             epoch_changes.push((block.number, phase));
         }
+
+        // The RPC client blocks on HTTP while the node serves it from its own runtime.
+        tokio::task::block_in_place(|| {
+            replay::check_block(
+                &provider,
+                &rpc,
+                block.number,
+                &mut report.for_block(block.number, phase),
+            )
+        });
         println!(
-            "[gravity_pipe] block {} at {} ({phase}){}",
+            "[gravity_pipe] block {} at {} ({phase}){}; {} mismatches so far",
             block.number,
             block.timestamp,
-            if block.epoch_changed { ", epoch changed" } else { "" }
+            if block.epoch_changed { ", epoch changed" } else { "" },
+            report.len(),
         );
 
         if phase == Phase::After(Fork::Gamma) && block.epoch_changed ||
@@ -127,5 +149,8 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
         "only {} epoch changes: {epoch_changes:?}",
         epoch_changes.len()
     );
+
+    // Step 4: every replay reproduced the committed blocks.
+    report.assert_empty();
     Ok(())
 }

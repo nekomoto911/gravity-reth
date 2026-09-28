@@ -57,6 +57,10 @@ where
         "--dev",
         "--datadir",
         datadir,
+        // Replays are checked over HTTP with every namespace, like a mainnet RPC node.
+        "--http",
+        "--http.api",
+        "all",
     ])
     .unwrap();
     runner
