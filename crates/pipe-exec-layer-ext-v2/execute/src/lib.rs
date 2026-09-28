@@ -42,8 +42,7 @@ use reth_evm::{
 use reth_evm_ethereum::EthEvmConfig;
 use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 use reth_pipe_exec_layer_event_bus::{
-    MakeCanonicalEvent, PipeExecLayerEvent, PipeExecLayerEventBus, WaitForPersistenceEvent,
-    PIPE_EXEC_LAYER_EVENT_BUS,
+    get_pipe_exec_layer_event_bus, MakeCanonicalEvent, PipeExecLayerEvent, WaitForPersistenceEvent,
 };
 use reth_primitives::{EthPrimitives, Recovered};
 use reth_primitives_traits::{
@@ -1709,8 +1708,7 @@ where
     let (ordered_block_tx, ordered_block_rx) = tokio::sync::mpsc::unbounded_channel();
     let (execution_result_tx, execution_result_rx) = tokio::sync::mpsc::unbounded_channel();
     let verified_block_hash_ch = Arc::new(Channel::new());
-    let (event_tx, event_rx) = std::sync::mpsc::channel();
-    let (discard_txs_tx, discard_txs_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, discard_txs_tx) = get_pipe_exec_layer_event_bus().take_senders();
 
     let storage = Arc::new(storage);
     let onchain_config_fetcher = OnchainConfigFetcher::new(eth_api);
@@ -1761,11 +1759,6 @@ where
         execution_args_rx,
     };
     tokio::spawn(service.run());
-
-    PIPE_EXEC_LAYER_EVENT_BUS.get_or_init(|| PipeExecLayerEventBus {
-        event_rx: std::sync::Mutex::new(Some(event_rx)),
-        discard_txs: tokio::sync::Mutex::new(Some(discard_txs_rx)),
-    });
 
     PipeExecLayerApi {
         ordered_block_tx,
