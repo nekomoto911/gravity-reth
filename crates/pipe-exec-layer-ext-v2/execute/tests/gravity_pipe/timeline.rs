@@ -4,7 +4,7 @@
 //! the real time at which they are built, so a block activates a fork when
 //! `parent_ts < fork_time <= block_ts`, never by block number.
 
-use crate::node::TestAccount;
+use crate::node::{delegation_code, TestAccount, DELEGATE};
 use alloy_primitives::{address, Address, B256, U256};
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardfork, GravityHardfork, Hardforks};
 use std::{
@@ -131,7 +131,8 @@ impl Timeline {
         Self { forks }
     }
 
-    /// Mainnet genesis with the test's hardfork times, epoch interval and funded accounts.
+    /// Mainnet genesis with the test's hardfork times, epoch interval and funded accounts, one
+    /// of them delegated.
     pub(crate) fn genesis_json(&self) -> String {
         let mut genesis: serde_json::Value = serde_json::from_str(MAINNET_GENESIS).unwrap();
 
@@ -154,6 +155,9 @@ impl Timeline {
             assert!(entry.is_null(), "{account:?} collides with a mainnet genesis account");
             *entry = serde_json::json!({ "balance": format!("{TEST_ACCOUNT_BALANCE_WEI:#x}") });
         }
+        // EIP-7702 is locked down until Beta, so only genesis can delegate an account before it.
+        let delegated = format!("{:#x}", TestAccount::Delegated.address());
+        genesis["alloc"][delegated]["code"] = serde_json::json!(delegation_code(DELEGATE));
 
         genesis.to_string()
     }

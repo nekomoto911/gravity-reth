@@ -1,9 +1,12 @@
 //! Test node and mock consensus: launches reth with the pipe execution layer, builds
 //! ordered blocks the way gravity-sdk does, and commits them one at a time.
 
-use alloy_consensus::{SignableTransaction, TxEip1559, TxLegacy};
+use alloy_consensus::{SignableTransaction, TxEip1559, TxEip7702, TxLegacy};
 use alloy_eips::{
-    eip7702::{Authorization, SignedAuthorization},
+    eip7702::{
+        constants::{EIP7702_DELEGATION_DESIGNATOR, PER_EMPTY_ACCOUNT_COST},
+        Authorization, SignedAuthorization,
+    },
     BlockId,
 };
 use alloy_primitives::{address, keccak256, Address, Bytes, Signature, TxKind, B256, U256};
@@ -50,6 +53,10 @@ const OLD_EPOCH_BLOCK_WAIT: Duration = Duration::from_secs(3);
 pub(crate) const MAX_FEE_PER_GAS: u128 = 100_000_000_000;
 const MAX_PRIORITY_FEE_PER_GAS: u128 = 1_000_000_000;
 pub(crate) const TRANSFER_GAS: u64 = 21_000;
+
+/// An EIP-7702 delegation target without code: a call to an account delegated to it runs
+/// nothing.
+pub(crate) const DELEGATE: Address = Address::repeat_byte(0xd3);
 
 /// `GBridgeSender` on Ethereum: the only sender `GBridgeReceiver` mints for.
 const ETHEREUM_BRIDGE: Address = address!("0xE82c61Ac9Ec2041b493118051afa4F18a55dC876");
@@ -308,19 +315,25 @@ where
 }
 
 /// Accounts the test signs user transactions for. Keys derive from fixed seeds, so every
-/// run signs the same transactions; all but `Unfunded` are funded in genesis.
+/// run signs the same transactions; the [`Self::FUNDED`] ones are funded in genesis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TestAccount {
     Alice,
     Bob,
     Carol,
     Dave,
+    /// Also delegated to [`DELEGATE`] in genesis: until Beta no transaction can delegate an
+    /// account, yet the lockdown before Beta needs one to reject transactions to and from.
+    Delegated,
+    /// Not funded; signs the delegation Beta's scenarios make once EIP-7702 is unlocked.
+    Erin,
     /// Never funded, so it stays absent from state and cannot pay for anything.
     Unfunded,
 }
 
 impl TestAccount {
-    pub(crate) const FUNDED: [Self; 4] = [Self::Alice, Self::Bob, Self::Carol, Self::Dave];
+    pub(crate) const FUNDED: [Self; 5] =
+        [Self::Alice, Self::Bob, Self::Carol, Self::Dave, Self::Delegated];
 
     pub(crate) fn address(self) -> Address {
         self.signer().address()
@@ -385,6 +398,33 @@ pub(crate) fn eip1559_tx(chain_id: u64, nonce: u64, to: TxKind) -> TxEip1559 {
         access_list: Default::default(),
         input: Bytes::new(),
     }
+}
+
+/// An EIP-7702 call of `to` without value or calldata, carrying `authorization_list`, with
+/// exactly its intrinsic gas and the fees of [`eip1559_tx`].
+pub(crate) fn eip7702_tx(
+    chain_id: u64,
+    nonce: u64,
+    to: Address,
+    authorization_list: Vec<SignedAuthorization>,
+) -> TxEip7702 {
+    TxEip7702 {
+        chain_id,
+        nonce,
+        gas_limit: TRANSFER_GAS + PER_EMPTY_ACCOUNT_COST * authorization_list.len() as u64,
+        max_fee_per_gas: MAX_FEE_PER_GAS,
+        max_priority_fee_per_gas: MAX_PRIORITY_FEE_PER_GAS,
+        to,
+        value: U256::ZERO,
+        access_list: Default::default(),
+        authorization_list,
+        input: Bytes::new(),
+    }
+}
+
+/// Code of an account delegated to `delegate`: the EIP-7702 designator.
+pub(crate) fn delegation_code(delegate: Address) -> Bytes {
+    [EIP7702_DELEGATION_DESIGNATOR.as_slice(), delegate.as_slice()].concat().into()
 }
 
 /// The legacy (EIP-155) counterpart of [`eip1559_tx`].

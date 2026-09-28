@@ -9,14 +9,14 @@
 //! Before Alpha, one block each: user transactions calling the BLS precompile with enough
 //! gas and with too little; a bridge deposit minting through `GBridgeReceiver`; a user
 //! transaction calling the mint precompile's address; assorted invalid transactions between
-//! valid ones. Before Alpha a red replay of these blocks points at the scenario itself, not
-//! at Alpha's gas-exempt system transactions.
+//! valid ones (Beta runs that block again once EIP-7702 is unlocked). Before Alpha a red replay of
+//! these blocks points at the scenario itself, not at Alpha's gas-exempt system transactions.
 
 use super::{Chain, ScenarioBlock};
 use crate::{
     node::{
-        eip1559_tx, legacy_tx, BridgeDeposits, CommittedBlock, SignedTx, TestAccount,
-        MAX_FEE_PER_GAS,
+        eip1559_tx, eip7702_tx, legacy_tx, BridgeDeposits, CommittedBlock, SignedTx, TestAccount,
+        DELEGATE, MAX_FEE_PER_GAS,
     },
     report::BlockReport,
     timeline::{Fork, Phase},
@@ -66,13 +66,10 @@ const DEPOSIT_AMOUNT: U256 = uint!(1_234_567_890_123_456_789_U256);
 /// so it never receives anything.
 const MINT_REQUEST_RECIPIENT: Address = Address::repeat_byte(0xd2);
 
-/// Delegation target of the EIP-7702 transaction that the lockdown before Beta rejects.
-const DELEGATE: Address = Address::repeat_byte(0xd3);
-
 /// Init code deploying the one-byte runtime `STOP`: `MSTORE8(0, 0) RETURN(0, 1)`.
 const STOP_CONTRACT_INIT_CODE: [u8; 10] = hex!("600060005360016000f3");
 /// Gas limit of scenario transactions that do more than a transfer; ample for each.
-const GAS_LIMIT: u64 = 100_000;
+pub(super) const GAS_LIMIT: u64 = 100_000;
 
 /// Plans one scenario block; the block is checked against the returned expectation once
 /// committed. `parent` is the last committed block.
@@ -190,113 +187,162 @@ impl Base {
         (ScenarioBlock { transactions: vec![call], ..Default::default() }, expected)
     }
 
-    /// Dave's valid transactions of every enabled envelope, including a contract creation,
-    /// with invalid ones between them that the pipe must drop before execution. Each invalid
-    /// transaction is valid but for one defect, so that defect is what drops it.
+    /// Assorted invalid transactions between valid ones, with EIP-7702 still locked down.
     fn invalid_transactions(
         &mut self,
         chain: &Chain<'_>,
         parent: u64,
     ) -> (ScenarioBlock, Expected) {
-        let (account, chain_id) = (TestAccount::Dave, chain.chain_id);
-        let nonce = chain.nonce(account.address(), parent);
-        let to_alice = TxKind::Call(TestAccount::Alice.address());
-        let one_gwei = U256::from(1_000_000_000u64);
+        let (block, inclusion) = invalid_transactions_block(chain, parent, false);
+        (block, Expected::InvalidTransactions { inclusion })
+    }
+}
 
-        let valid = vec![
-            account.sign(TxLegacy { value: one_gwei, ..legacy_tx(chain_id, nonce, to_alice) }),
-            account.sign(TxEip2930 {
-                chain_id,
-                nonce: nonce + 1,
-                gas_price: MAX_FEE_PER_GAS,
-                gas_limit: 21_000,
-                to: to_alice,
-                value: one_gwei,
-                access_list: Default::default(),
-                input: Bytes::new(),
-            }),
-            account.sign(TxEip1559 {
-                gas_limit: GAS_LIMIT,
-                input: Bytes::from(STOP_CONTRACT_INIT_CODE),
-                ..eip1559_tx(chain_id, nonce + 2, TxKind::Create)
-            }),
-        ];
-        // Unless the defect is its nonce, every invalid transaction takes the nonce the last
-        // valid one then uses.
-        let next = nonce + 3;
-        let template = eip1559_tx(chain_id, next, to_alice);
-        let invalid = vec![
-            // Nonce too high, nonce already used.
-            account.sign(TxEip1559 { nonce: next + 1, ..template.clone() }),
-            account.sign(TxEip1559 { nonce, ..template.clone() }),
-            // Signed for Ethereum mainnet.
-            account.sign(legacy_tx(1, next, to_alice)),
-            // Fee cap below the base fee; tip above the fee cap.
-            account.sign(TxEip1559 {
-                max_fee_per_gas: 1_000_000_000,
-                max_priority_fee_per_gas: 0,
-                ..template.clone()
-            }),
-            account.sign(TxEip1559 {
-                max_priority_fee_per_gas: template.max_fee_per_gas + 1,
-                ..template.clone()
-            }),
-            // Below the intrinsic gas; more value than the balance.
-            account.sign(TxEip1559 { gas_limit: 20_999, ..template.clone() }),
-            account.sign(TxEip1559 { value: U256::MAX, ..template.clone() }),
-            // Blob transactions are unsupported on Gravity.
-            account.sign(TxEip4844 {
-                chain_id,
-                nonce: next,
-                gas_limit: GAS_LIMIT,
-                max_fee_per_gas: template.max_fee_per_gas,
-                max_priority_fee_per_gas: template.max_priority_fee_per_gas,
-                to: TestAccount::Alice.address(),
-                value: U256::ZERO,
-                access_list: Default::default(),
-                blob_versioned_hashes: vec![],
-                max_fee_per_blob_gas: 1,
-                input: Bytes::new(),
-            }),
-            // Init code over the EIP-3860 limit.
-            account.sign(TxEip1559 {
-                gas_limit: 1_000_000,
-                input: Bytes::from(vec![0; MAX_INITCODE_SIZE + 1]),
-                ..eip1559_tx(chain_id, next, TxKind::Create)
-            }),
-            // EIP-7702 stays locked down until Beta.
-            account.sign(TxEip7702 {
-                chain_id,
-                nonce: next,
-                gas_limit: GAS_LIMIT,
-                max_fee_per_gas: template.max_fee_per_gas,
-                max_priority_fee_per_gas: template.max_priority_fee_per_gas,
-                to: TestAccount::Alice.address(),
-                value: U256::ZERO,
-                access_list: Default::default(),
-                authorization_list: vec![TestAccount::Bob.authorize(
-                    chain_id,
-                    DELEGATE,
-                    chain.nonce(TestAccount::Bob.address(), parent),
-                )],
-                input: Bytes::new(),
-            }),
-            // A sender absent from state.
-            TestAccount::Unfunded.sign(eip1559_tx(chain_id, 0, to_alice)),
-        ];
-        let last_valid = account.sign(template);
+/// Dave's valid transactions of every enabled envelope, including a contract creation, with
+/// invalid ones between them that the pipe must drop before execution. Each invalid transaction
+/// is valid but for one defect, so that defect is what drops it.
+///
+/// Until Beta, the lockdown makes an EIP-7702 transaction one of the invalid ones. Once
+/// `eip7702_unlocked`, it is one of the valid ones, and EIP-7702 transactions without an
+/// authorization or below their intrinsic gas take its place among the invalid ones.
+pub(super) fn invalid_transactions_block(
+    chain: &Chain<'_>,
+    parent: u64,
+    eip7702_unlocked: bool,
+) -> (ScenarioBlock, Inclusion) {
+    let (account, chain_id) = (TestAccount::Dave, chain.chain_id);
+    let nonce = chain.nonce(account.address(), parent);
+    let alice = TestAccount::Alice.address();
+    let to_alice = TxKind::Call(alice);
+    let one_gwei = U256::from(1_000_000_000u64);
+    let bob = TestAccount::Bob;
+    let delegate_bob =
+        || vec![bob.authorize(chain_id, DELEGATE, chain.nonce(bob.address(), parent))];
 
-        let expected = Expected::InvalidTransactions {
-            submitted: valid
-                .iter()
-                .chain(&invalid)
-                .chain([&last_valid])
-                .map(SignedTx::hash)
-                .collect(),
-            valid: valid.iter().chain([&last_valid]).map(SignedTx::hash).collect(),
-        };
-        let transactions = valid.into_iter().chain(invalid).chain([last_valid]).collect();
-        (ScenarioBlock { transactions, ..Default::default() }, expected)
+    let mut valid = vec![
+        account.sign(TxLegacy { value: one_gwei, ..legacy_tx(chain_id, nonce, to_alice) }),
+        account.sign(TxEip2930 {
+            chain_id,
+            nonce: nonce + 1,
+            gas_price: MAX_FEE_PER_GAS,
+            gas_limit: 21_000,
+            to: to_alice,
+            value: one_gwei,
+            access_list: Default::default(),
+            input: Bytes::new(),
+        }),
+        account.sign(TxEip1559 {
+            gas_limit: GAS_LIMIT,
+            input: Bytes::from(STOP_CONTRACT_INIT_CODE),
+            ..eip1559_tx(chain_id, nonce + 2, TxKind::Create)
+        }),
+    ];
+    if eip7702_unlocked {
+        valid.push(account.sign(eip7702_tx(chain_id, nonce + 3, alice, delegate_bob())));
+    }
+
+    // Unless the defect is its nonce, every invalid transaction takes the nonce the last valid
+    // one then uses.
+    let next = nonce + valid.len() as u64;
+    let template = eip1559_tx(chain_id, next, to_alice);
+    let eip7702 = eip7702_tx(chain_id, next, alice, delegate_bob());
+    let mut invalid = vec![
+        // Nonce too high, nonce already used.
+        account.sign(TxEip1559 { nonce: next + 1, ..template.clone() }),
+        account.sign(TxEip1559 { nonce, ..template.clone() }),
+        // Signed for Ethereum mainnet.
+        account.sign(legacy_tx(1, next, to_alice)),
+        // Fee cap below the base fee; tip above the fee cap.
+        account.sign(TxEip1559 {
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 0,
+            ..template.clone()
+        }),
+        account.sign(TxEip1559 {
+            max_priority_fee_per_gas: template.max_fee_per_gas + 1,
+            ..template.clone()
+        }),
+        // Below the intrinsic gas; more value than the balance.
+        account.sign(TxEip1559 { gas_limit: 20_999, ..template.clone() }),
+        account.sign(TxEip1559 { value: U256::MAX, ..template.clone() }),
+        // Blob transactions are unsupported on Gravity.
+        account.sign(TxEip4844 {
+            chain_id,
+            nonce: next,
+            gas_limit: GAS_LIMIT,
+            max_fee_per_gas: template.max_fee_per_gas,
+            max_priority_fee_per_gas: template.max_priority_fee_per_gas,
+            to: alice,
+            value: U256::ZERO,
+            access_list: Default::default(),
+            blob_versioned_hashes: vec![],
+            max_fee_per_blob_gas: 1,
+            input: Bytes::new(),
+        }),
+        // Init code over the EIP-3860 limit.
+        account.sign(TxEip1559 {
+            gas_limit: 1_000_000,
+            input: Bytes::from(vec![0; MAX_INITCODE_SIZE + 1]),
+            ..eip1559_tx(chain_id, next, TxKind::Create)
+        }),
+    ];
+    if eip7702_unlocked {
+        // No authorization; one gas below the intrinsic gas of its one authorization.
+        invalid.push(account.sign(TxEip7702 { authorization_list: vec![], ..eip7702.clone() }));
+        invalid.push(account.sign(TxEip7702 { gas_limit: eip7702.gas_limit - 1, ..eip7702 }));
+    } else {
+        invalid.push(account.sign(eip7702));
+    }
+    // A sender absent from state.
+    invalid.push(TestAccount::Unfunded.sign(eip1559_tx(chain_id, 0, to_alice)));
+    let last_valid = account.sign(template);
+
+    let transactions = valid
+        .into_iter()
+        .map(|tx| (tx, true))
+        .chain(invalid.into_iter().map(|tx| (tx, false)))
+        .chain([(last_valid, true)])
+        .collect();
+    Inclusion::plan(transactions)
+}
+
+/// Transactions submitted in one block, of which exactly the `included` ones must be in it, in
+/// submission order.
+#[derive(Debug)]
+pub(super) struct Inclusion {
+    submitted: Vec<B256>,
+    pub(super) included: Vec<B256>,
+}
+
+impl Inclusion {
+    /// The block carrying `transactions` in order, and which of them it must include.
+    pub(super) fn plan(transactions: Vec<(SignedTx, bool)>) -> (ScenarioBlock, Self) {
+        let submitted = transactions.iter().map(|(tx, _)| tx.hash()).collect();
+        let included = transactions
+            .iter()
+            .filter(|(_, included)| *included)
+            .map(|(tx, _)| tx.hash())
+            .collect();
+        let transactions = transactions.into_iter().map(|(tx, _)| tx).collect();
+        (ScenarioBlock { transactions, ..Default::default() }, Self { submitted, included })
+    }
+
+    /// The committed body holds exactly the included transactions, in order, and none of the
+    /// others.
+    pub(super) fn check(
+        &self,
+        chain: &Chain<'_>,
+        block: &CommittedBlock,
+        report: &mut BlockReport<'_>,
+        source: &'static str,
+    ) {
+        let included: Vec<B256> = chain
+            .block(block.number)
+            .transactions
+            .hashes()
+            .filter(|hash| self.submitted.contains(hash))
+            .collect();
+        report.check_eq(source, None, "included test transactions", &self.included, &included);
     }
 }
 
@@ -314,10 +360,9 @@ enum Expected {
     UserCallsMintAddress {
         tx: B256,
     },
-    /// Of the `submitted` transactions, exactly the `valid` ones are in the block, in order.
+    /// Of the submitted transactions, exactly the valid ones are in the block, in order.
     InvalidTransactions {
-        submitted: Vec<B256>,
-        valid: Vec<B256>,
+        inclusion: Inclusion,
     },
 }
 
@@ -360,20 +405,8 @@ impl Expected {
                     U256::ZERO,
                 );
             }
-            Self::InvalidTransactions { submitted, valid } => {
-                let included: Vec<B256> = chain
-                    .block(block.number)
-                    .transactions
-                    .hashes()
-                    .filter(|hash| submitted.contains(hash))
-                    .collect();
-                report.check_eq(
-                    "scenario: invalid transactions",
-                    None,
-                    "included test transactions",
-                    valid,
-                    included,
-                );
+            Self::InvalidTransactions { inclusion } => {
+                inclusion.check(chain, block, report, "scenario: invalid transactions");
             }
         }
     }
@@ -410,7 +443,7 @@ fn check_epoch(chain: &Chain<'_>, block: &CommittedBlock, report: &mut BlockRepo
 }
 
 /// The transaction is in a committed block and succeeded (or failed) as expected.
-fn check_tx_success(
+pub(super) fn check_tx_success(
     chain: &Chain<'_>,
     report: &mut BlockReport<'_>,
     source: &'static str,

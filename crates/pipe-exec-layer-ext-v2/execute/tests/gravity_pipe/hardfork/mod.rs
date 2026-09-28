@@ -45,6 +45,7 @@ impl ScenarioBlock {
 pub(crate) struct Scenarios {
     prague: prague::Prague,
     alpha: alpha::Alpha,
+    beta: beta::Beta,
     base: base::Base,
 }
 
@@ -62,6 +63,7 @@ impl Scenarios {
         self.prague
             .next_block(phase, parent)
             .or_else(|| self.alpha.next_block(chain, phase, parent))
+            .or_else(|| self.beta.next_block(chain, phase, parent))
             .or_else(|| self.base.next_block(chain, phase, parent))
     }
 
@@ -74,6 +76,7 @@ impl Scenarios {
     ) {
         self.prague.after_commit(chain, block, report);
         self.alpha.after_commit(chain, block, report);
+        self.beta.after_commit(chain, block, report);
         self.base.after_commit(chain, block, report);
     }
 
@@ -81,6 +84,7 @@ impl Scenarios {
     pub(crate) fn assert_all_ran(&self) {
         self.prague.assert_all_ran();
         self.alpha.assert_all_ran();
+        self.beta.assert_all_ran();
         self.base.assert_all_ran();
     }
 }
