@@ -17,13 +17,16 @@ const MAINNET_GENESIS: &str = include_str!("mainnet_genesis.json");
 
 /// Offset of each hardfork from the test start, in chain order.
 ///
-/// Each phase must be long enough to see at least one epoch change (one epoch interval
-/// plus the block that delivers the DKG transcript) besides its own scenario blocks.
+/// Each phase must see at least one epoch change. Scenario blocks never delay one (a pending
+/// DKG transcript takes the next block that may change the epoch), so the latest a phase's
+/// epoch change can land is one epoch interval plus about two blocks after the phase starts;
+/// the rest of the phase is margin against slow blocks (a block with a DKG start and several
+/// transactions takes up to ~7 s to execute and replay).
 const FORK_OFFSETS: [(Fork, Duration); 4] = [
-    (Fork::Prague, Duration::from_secs(25)),
-    (Fork::Alpha, Duration::from_secs(40)),
-    (Fork::Beta, Duration::from_secs(55)),
-    (Fork::Gamma, Duration::from_secs(70)),
+    (Fork::Prague, Duration::from_secs(40)),
+    (Fork::Alpha, Duration::from_secs(80)),
+    (Fork::Beta, Duration::from_secs(120)),
+    (Fork::Gamma, Duration::from_secs(160)),
 ];
 
 /// Mainnet reconfigures every 2 hours; the test shortens it so that epoch changes

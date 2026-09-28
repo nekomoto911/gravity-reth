@@ -94,16 +94,22 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
         let parent_timestamp = node.parent_timestamp();
         let phase = timeline.phase(timestamp_us / 1_000_000, parent_timestamp);
 
-        // An epoch-change block drops user transactions, and mainnet never changed epoch on
-        // an activation block: a pending DKG transcript waits for a block free of both.
-        let scenario = tokio::task::block_in_place(|| {
-            scenarios.next_block(&chain, phase, node.parent_number())
-        });
-        let may_change_epoch = scenario.is_none() && !matches!(phase, Phase::Activation(_));
+        // A pending DKG transcript takes the first block that may change the epoch, so
+        // scenario blocks never push an epoch change toward the end of a phase. Mainnet never
+        // changed epoch on an activation block, and an epoch-change block drops user
+        // transactions: scenarios get every other block.
+        let epoch_change_due = node.dkg_in_progress() && !matches!(phase, Phase::Activation(_));
+        let scenario = if epoch_change_due {
+            None
+        } else {
+            tokio::task::block_in_place(|| {
+                scenarios.next_block(&chain, phase, node.parent_number())
+            })
+        };
         let block = node
             .produce_block(BlockInput {
                 timestamp_us,
-                may_change_epoch,
+                may_change_epoch: epoch_change_due,
                 ..scenario.map(ScenarioBlock::into_input).unwrap_or_default()
             })
             .await;

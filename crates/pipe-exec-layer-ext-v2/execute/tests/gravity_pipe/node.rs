@@ -178,6 +178,11 @@ where
         }
     }
 
+    /// Whether a DKG session is open, so the next block allowed to change the epoch will.
+    pub(crate) const fn dkg_in_progress(&self) -> bool {
+        self.dkg_in_progress
+    }
+
     /// Number of the last committed block.
     pub(crate) const fn parent_number(&self) -> u64 {
         self.parent_number
