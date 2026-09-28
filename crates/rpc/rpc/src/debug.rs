@@ -30,7 +30,7 @@ use reth_revm::{db::State, witness::ExecutionWitnessRecord};
 use reth_rpc_api::DebugApiServer;
 use reth_rpc_convert::RpcTxReq;
 use reth_rpc_eth_api::{
-    helpers::{EthTransactions, TraceExt},
+    helpers::{pre_alpha_epoch_block::is_pre_alpha_dkg_epoch_block, EthTransactions, TraceExt},
     FromEthApiError, FromEvmError, RpcConvert, RpcNodeCore,
 };
 use reth_rpc_eth_types::{EthApiError, StateCacheDb};
@@ -574,6 +574,15 @@ where
         &self,
         block: Arc<RecoveredBlock<ProviderBlock<Eth::Provider>>>,
     ) -> Result<ExecutionWitness, Eth::Error> {
+        // The witness comes from re-executing the body as a standalone block, which cannot
+        // include the `onBlockStart` such a block executed outside its body.
+        if is_pre_alpha_dkg_epoch_block(self.provider().chain_spec().as_ref(), &block) {
+            return Err(Eth::Error::from_eth_err(EthApiError::Unsupported(
+                "execution witness is unavailable for a pre-Alpha DKG epoch-change block: its \
+                 body omits the executed onBlockStart metadata transaction",
+            )))
+        }
+
         let block_number = block.header().number();
 
         let (mut exec_witness, lowest_block_number) = self
@@ -681,12 +690,12 @@ where
 
         self.eth_api()
             .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
+                eth_api.apply_pre_execution_changes(&block, &mut db)?;
                 let mut executor = eth_api
                     .evm_config()
                     .executor_for_block(&mut db, block.sealed_block())
                     .map_err(RethError::other)
                     .map_err(Eth::Error::from_eth_err)?;
-                executor.apply_pre_execution_changes().map_err(Eth::Error::from_eth_err)?;
 
                 for tx in block.transactions_recovered().take(tx_index + 1) {
                     executor.execute_transaction(tx).map_err(Eth::Error::from_eth_err)?;

@@ -77,11 +77,6 @@ sol! {
         bool hasInProgress
     );
 
-    // Function to finish DKG with result - matches IReconfiguration.finishTransition
-    function finishTransition(
-        bytes calldata dkgResult
-    ) external;
-
     // Function to get current randomness configuration - matches RandomnessConfig.getCurrentConfig()
     function getCurrentConfig() external view returns (RandomnessConfigData memory);
 
@@ -396,6 +391,7 @@ pub(crate) fn construct_dkg_transaction(
     use super::RECONFIGURATION_WITH_DKG_ADDR;
     use alloy_primitives::Bytes;
     use alloy_sol_types::SolCall;
+    use reth_chainspec::gravity_system_contracts::finishTransitionCall;
 
     // Validate transcript size before constructing system transaction.
     //

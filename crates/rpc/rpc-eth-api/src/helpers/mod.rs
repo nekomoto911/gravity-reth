@@ -21,6 +21,7 @@ pub mod config;
 pub mod estimate;
 pub mod fee;
 pub mod pending_block;
+pub mod pre_alpha_epoch_block;
 pub mod receipt;
 pub mod signer;
 pub mod spec;

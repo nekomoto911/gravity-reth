@@ -1,16 +1,16 @@
 //! Loads a pending block from database. Helper trait for `eth_` call and trace RPC methods.
 
 use super::{Call, LoadBlock, LoadState, LoadTransaction};
-use crate::{FromEthApiError, FromEvmError};
+use crate::FromEvmError;
 use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_primitives::B256;
 use alloy_rpc_types_eth::{BlockId, TransactionInfo};
 use futures::Future;
 use reth_chainspec::{is_gravity_system_caller, is_system_tx_gas_exempt, ChainSpecProvider};
-use reth_errors::{ProviderError, RethError};
+use reth_errors::ProviderError;
 use reth_evm::{
-    block::BlockExecutor, ConfigureEvm, Database, Evm, EvmEnvFor, EvmFactory, EvmFor,
-    HaltReasonFor, InspectorFor, TxEnvFor,
+    ConfigureEvm, Database, Evm, EvmEnvFor, EvmFactory, EvmFor, HaltReasonFor, InspectorFor,
+    TxEnvFor,
 };
 use reth_primitives_traits::{BlockBody, Recovered, RecoveredBlock};
 use reth_revm::{
@@ -592,24 +592,5 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
         R: Send + 'static,
     {
         self.trace_block_until_with_inspector(block_id, block, None, insp_setup, f)
-    }
-
-    /// Applies chain-specific state transitions required before executing a block.
-    ///
-    /// Note: This should only be called when tracing an entire block vs individual transactions.
-    /// When tracing transactions on top of an already committed block state, those transitions are
-    /// already applied.
-    fn apply_pre_execution_changes(
-        &self,
-        block: &RecoveredBlock<ProviderBlock<Self::Provider>>,
-        db: &mut StateCacheDb,
-    ) -> Result<(), Self::Error> {
-        self.evm_config()
-            .executor_for_block(db, block.sealed_block())
-            .map_err(RethError::other)
-            .map_err(Self::Error::from_eth_err)?
-            .apply_pre_execution_changes()
-            .map_err(Self::Error::from_eth_err)?;
-        Ok(())
     }
 }

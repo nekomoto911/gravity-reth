@@ -27,9 +27,7 @@ use revm::{
 };
 use std::fmt::Debug;
 
-/// NIL proposer index constant (from Blocker.sol)
-/// NIL blocks occur when consensus cannot produce a block with transactions
-pub const NIL_PROPOSER_INDEX: u64 = u64::MAX;
+pub use reth_chainspec::gravity_system_contracts::NIL_PROPOSER_INDEX;
 
 /// Result of a metadata transaction execution
 /// Merge new state changes into accumulated state changes
