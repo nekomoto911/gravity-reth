@@ -28,9 +28,9 @@ fn reth_ok(args: &[&str]) -> String {
 /// `--gravity.disable-pipe-execution` is required for the `--dev` local miner to
 /// make progress. Gravity replaces reth's native block production with a
 /// pipe-execution / BFT flow whose canonical chain is driven by an external
-/// consensus driver (gravity-sdk) that initializes the pipe-exec event bus. A
+/// consensus driver (gravity-sdk) that starts the pipe-exec service. A
 /// standalone dev node has no such driver, so in the default (pipe) mode the
-/// engine thread busy-waits on `get_pipe_exec_layer_event_bus()` and never
+/// engine thread blocks waiting for pipe-exec events and never
 /// processes the local miner's Engine-API `newPayload`/`forkchoiceUpdated` — the
 /// node would never mine and any mining test hangs. Disabling pipe execution
 /// routes the engine through the upstream `run_inner` path where the local miner
