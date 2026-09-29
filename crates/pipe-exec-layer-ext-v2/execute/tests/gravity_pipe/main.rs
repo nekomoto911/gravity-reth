@@ -36,6 +36,11 @@ const DATADIR: &str = "data/gravity_pipe";
 /// Sleep between two blocks; block timestamps are the wall-clock time at build.
 const BLOCK_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Longest a block may take to be executed, committed and persisted. The slowest take a few
+/// seconds; a pipe that hangs fails the run with the block's number instead of waiting for
+/// nextest to kill it without a reason.
+const BLOCK_TIMEOUT: Duration = Duration::from_secs(30);
+
 const MIN_EPOCH_CHANGES: usize = 5;
 
 #[test]
@@ -106,13 +111,16 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
                 scenarios.next_block(&chain, phase, node.parent_number())
             })
         };
-        let block = node
-            .produce_block(BlockInput {
-                timestamp_us,
-                may_change_epoch: epoch_change_due,
-                ..scenario.map(ScenarioBlock::into_input).unwrap_or_default()
-            })
-            .await;
+        let number = node.parent_number() + 1;
+        let input = BlockInput {
+            timestamp_us,
+            may_change_epoch: epoch_change_due,
+            ..scenario.map(ScenarioBlock::into_input).unwrap_or_default()
+        };
+        let block =
+            tokio::time::timeout(BLOCK_TIMEOUT, node.produce_block(input)).await.unwrap_or_else(
+                |_| panic!("block {number} ({phase}) not persisted within {BLOCK_TIMEOUT:?}"),
+            );
 
         // The chain spec must agree with the timeline on which block activates a fork.
         for fork in Fork::ALL {
@@ -154,7 +162,9 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
     }
 
     // Step 3: every scenario got its blocks, every phase saw an epoch change, and there were
-    // enough of them overall.
+    // enough of them overall. A failed assertion exits the process, so the mismatches found so
+    // far are printed first.
+    report.print();
     scenarios.assert_all_ran();
     let required_phases =
         std::iter::once(Phase::Genesis).chain(Fork::ALL.into_iter().map(Phase::After));

@@ -29,13 +29,19 @@ impl MismatchReport {
         self.mismatches.len()
     }
 
+    /// Prints every mismatch recorded so far, without failing.
+    pub(crate) fn print(&self) {
+        println!("[gravity_pipe] recorded so far: {}", self.listing());
+    }
+
     /// Fails the test with every recorded mismatch.
     pub(crate) fn assert_empty(&self) {
-        if self.mismatches.is_empty() {
-            return;
-        }
+        assert!(self.mismatches.is_empty(), "{}", self.listing());
+    }
+
+    fn listing(&self) -> String {
         let entries: Vec<String> = self.mismatches.iter().map(Mismatch::to_string).collect();
-        panic!("{} mismatches:\n{}", entries.len(), entries.join("\n"));
+        format!("{} mismatches:\n{}", entries.len(), entries.join("\n"))
     }
 }
 

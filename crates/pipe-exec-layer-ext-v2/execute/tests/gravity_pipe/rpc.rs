@@ -5,8 +5,10 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::{net::SocketAddr, time::Duration};
 
-/// Generous for a local node: struct-log traces of system transactions are large.
-const TIMEOUT: Duration = Duration::from_secs(60);
+/// Every call blocks the timeline, so a hung endpoint must fail its call before it pushes later
+/// blocks past their phase boundaries or the run past nextest's ceiling. Still generous for a
+/// local node, whose slowest calls re-execute a hundred blocks.
+const TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) struct RpcClient {
     agent: ureq::Agent,

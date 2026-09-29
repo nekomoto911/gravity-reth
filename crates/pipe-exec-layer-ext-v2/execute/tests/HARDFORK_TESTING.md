@@ -119,8 +119,9 @@ why.
 ### How failures are reported
 
 Every difference, including an endpoint error, is recorded in the shared `MismatchReport` and the
-timeline continues. Scenario assertions record into the same report. At the end the test panics
-with one line per entry:
+timeline continues. Scenario assertions record into the same report. Before the end-of-run
+harness assertions the test prints the entries recorded so far, so a harness failure cannot hide
+them; at the end it panics with one line per entry:
 
 ```
 block <number> (<phase>) <endpoint or scenario> [tx <index>] <field>: expected <value>, actual <value>
@@ -131,7 +132,7 @@ While running, the test prints one line per block (`[gravity_pipe] block N at <t
 (<phase>)[, epoch changed]; M mismatches so far`).
 
 Only harness invariants panic immediately: a block that cannot be built, executed, committed or
-persisted; the chain spec disagreeing with the timeline; epoch accounting (a transcript without an
+persisted, or takes over `BLOCK_TIMEOUT` (`main.rs`) to do so; the chain spec disagreeing with the timeline; epoch accounting (a transcript without an
 epoch change, a skipped epoch, an executed old-epoch block, a phase without an epoch change, too
 few epoch changes); a scenario whose phase ended before it got its block; and a failed read of the
 committed chain through `Chain`.
