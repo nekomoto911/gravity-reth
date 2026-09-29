@@ -31,8 +31,10 @@ pub(super) fn check_call_traces(
 }
 
 /// Parity-style traces list every call frame; a transaction's root frame has an empty
-/// trace address. The root's `gasUsed` excludes intrinsic gas and refunds, so it is not
-/// the receipt's gas and only success is compared.
+/// trace address. Only success is compared: reth (`crates/rpc/rpc/src/trace.rs`) never sets the
+/// transaction's gas used on the root trace (revm-inspectors'
+/// `ParityTraceBuilder::set_transaction_gas_used`), so the builder reports the root call frame's
+/// gas, without intrinsic gas and refunds, instead of the receipt's.
 pub(super) fn check_parity_traces(
     report: &mut BlockReport<'_>,
     endpoint: &'static str,

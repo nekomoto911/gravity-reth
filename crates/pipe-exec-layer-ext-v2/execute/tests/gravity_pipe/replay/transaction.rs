@@ -3,9 +3,10 @@
 //!
 //! Each endpoint is compared on what it exposes:
 //! - `debug_traceTransaction` (call tracer): the root frame's gas used and error;
-//! - `trace_replayTransaction`: the root trace's error; its `gasUsed` is the call frame's usage,
-//!   not the receipt's, because reth's parity builder never sets the transaction's gas on the root
-//!   trace;
+//! - `trace_replayTransaction`: the root trace's error. Its `gasUsed` is not the receipt's: reth
+//!   (`crates/rpc/rpc/src/trace.rs`) never sets the transaction's gas used on the root trace
+//!   (revm-inspectors' `ParityTraceBuilder::set_transaction_gas_used`), so the builder reports the
+//!   root call frame's gas, without intrinsic gas and refunds;
 //! - `trace_transaction`, `trace_get` (index 0): the root trace's transaction hash, position and
 //!   error (same gas caveat);
 //! - `trace_transactionOpcodeGas`: the transaction hash (opcode gas excludes intrinsic gas and

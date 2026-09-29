@@ -166,7 +166,11 @@ Using a hypothetical `Delta` hardfork activated by a genesis `deltaTime`:
    from `next_block`, `after_commit` and `assert_all_ran`. Hardfork modules come before `base` in
    `next_block`, because their phases are short.
 
-The replay check runs on the new blocks without any change. Add a `replay/` module only for a new
+The replay check runs on the new blocks unchanged, unless the fork writes state outside
+transactions (a migration, a deployment, a post-execution hook). Register such writes in
+`replay/committed.rs` (`written_outside_transactions`, plus `written_after_transactions` for
+writes after the last transaction), as Prague, Alpha and Gamma do; otherwise every replay that
+reveals state per transaction reports them as mismatches. Add a `replay/` module only for a new
 class of endpoint.
 
 ## Running

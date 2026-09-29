@@ -114,7 +114,8 @@ impl Alpha {
     }
 
     /// Alice calls the BLS precompile and Bob the randomness-by-height precompile, for the
-    /// parent's height. The chain installs both for user transactions from Alpha on.
+    /// parent's height. The chain installs the BLS precompile for user transactions before Alpha
+    /// too; the randomness-by-height precompile only from Alpha on.
     fn precompile_calls(chain: &Chain<'_>, parent: u64) -> (ScenarioBlock, Expected) {
         let bls = bls_call(chain, parent, TestAccount::Alice, BLS_ENOUGH_GAS);
         let account = TestAccount::Bob;

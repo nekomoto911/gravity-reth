@@ -102,7 +102,7 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
         // A pending DKG transcript takes the first block that may change the epoch, so
         // scenario blocks never push an epoch change toward the end of a phase. Mainnet never
         // changed epoch on an activation block, and an epoch-change block drops user
-        // transactions: scenarios get every other block.
+        // transactions: scenarios get all remaining blocks.
         let epoch_change_due = node.dkg_in_progress() && !matches!(phase, Phase::Activation(_));
         let scenario = if epoch_change_due {
             None

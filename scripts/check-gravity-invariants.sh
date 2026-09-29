@@ -40,9 +40,10 @@
 #      appear in the `--test <name>` allowlist in
 #      `.github/workflows/integration.yml` OR be listed in the
 #      `KNOWN_UNWIRED_TESTS` skip set inside invariant 9 with a documented
-#      reason. Rationale: `-p reth-pipe-exec-layer-ext-v2` alone would try
-#      to compile every binary in the dir, including ones with dev-dep gaps,
-#      so the workflow uses an explicit allowlist. Without invariant 9, a
+#      reason. Rationale: `-p reth-pipe-exec-layer-ext-v2` alone would run
+#      every binary in the dir, including `pipe_test`, `mainnet_replay` and
+#      `wipe_recreate_e2e`, which the job deliberately leaves out, so the
+#      workflow uses an explicit allowlist. Without invariant 9, a
 #      newly added test binary is silently skipped by CI (as happened with
 #      the six #367 / #370 files) — assertions may pass locally but never
 #      gate a merge.
@@ -250,9 +251,9 @@ ok 8 "RPC replay paths reference SYSTEM_CALLER exemption check"
 # in `.github/workflows/integration.yml` OR be listed in `KNOWN_UNWIRED_TESTS`
 # below with a documented reason. The
 # workflow uses an explicit allowlist (not `-p reth-pipe-exec-layer-ext-v2`
-# alone) because the crate has integration binaries whose dev-deps are
-# missing in this workspace; that same allowlist silently skips new files
-# unless they are added by hand.
+# alone) to leave out the crate's other integration binaries (`pipe_test`,
+# `mainnet_replay`, `wipe_recreate_e2e`); that same allowlist silently skips
+# new files unless they are added by hand.
 #
 # Deferred entries force a future contributor to make an explicit
 # claim ("wire" or "defer, with reason"), preventing another silent-skip
