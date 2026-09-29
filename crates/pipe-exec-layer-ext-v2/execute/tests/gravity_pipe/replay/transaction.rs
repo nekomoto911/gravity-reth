@@ -16,7 +16,10 @@
 //!
 //! Anywhere else, an error or a missing trace is the mismatch.
 
-use super::{call_tracer_options, check_call_frame, committed::Committed, result_or_record};
+use super::{
+    call_tracer_options, check_call_frame, committed::Committed, present_or_record,
+    result_or_record,
+};
 use crate::{report::BlockReport, rpc::RpcClient};
 use alloy_primitives::Bytes;
 use alloy_rpc_types_trace::{
@@ -53,25 +56,26 @@ pub(super) fn check_transaction(
     }
     let endpoint = "trace_transaction";
     let response = rpc.call::<Option<Vec<LocalizedTransactionTrace>>>(endpoint, json!([hash]));
-    if let Some(traces) = present_or_record(report, endpoint, index, response) {
+    if let Some(traces) = present_or_record(report, endpoint, Some(index), "response", response) {
         check_parity_root(report, endpoint, committed, index, traces.first());
     }
     let endpoint = "trace_get";
     let response = rpc.call::<Option<LocalizedTransactionTrace>>(endpoint, json!([hash, ["0x0"]]));
-    if let Some(root) = present_or_record(report, endpoint, index, response) {
+    if let Some(root) = present_or_record(report, endpoint, Some(index), "response", response) {
         check_parity_root(report, endpoint, committed, index, Some(&root));
     }
 
     // Step 3: endpoints that expose neither gas nor status.
     let endpoint = "trace_transactionOpcodeGas";
     let response = rpc.call::<Option<TransactionOpcodeGas>>(endpoint, json!([hash]));
-    if let Some(opcode_gas) = present_or_record(report, endpoint, index, response) {
+    if let Some(opcode_gas) = present_or_record(report, endpoint, Some(index), "response", response)
+    {
         let actual = opcode_gas.transaction_hash;
         report.check_eq(endpoint, Some(index), "transaction hash", hash, actual);
     }
     let endpoint = "ots_traceTransaction";
     let response = rpc.call::<Option<Vec<TraceEntry>>>(endpoint, json!([hash]));
-    if let Some(entries) = present_or_record(report, endpoint, index, response) &&
+    if let Some(entries) = present_or_record(report, endpoint, Some(index), "response", response) &&
         entries.is_empty()
     {
         report.record(endpoint, Some(index), "trace entries", "the root call", "none");
@@ -84,20 +88,6 @@ pub(super) fn check_transaction(
     let endpoint = "ots_getTransactionError";
     let response = rpc.call::<Option<Bytes>>(endpoint, json!([hash]));
     check_transaction_error(report, endpoint, committed, index, frame.as_ref(), response);
-}
-
-/// Returns a present result; records an error or a `null` result and returns `None`.
-fn present_or_record<T>(
-    report: &mut BlockReport<'_>,
-    endpoint: &'static str,
-    index: usize,
-    response: Result<Option<T>, String>,
-) -> Option<T> {
-    let result = result_or_record(report, endpoint, Some(index), response)?;
-    if result.is_none() {
-        report.record(endpoint, Some(index), "response", "a trace", "null");
-    }
-    result
 }
 
 /// The transaction's root trace: first in the flat trace list, with an empty trace address.

@@ -1,7 +1,7 @@
 //! `ots_getContractCreator`: every contract the block created names the transaction that
 //! created it and its creator.
 
-use super::{committed::Committed, result_or_record};
+use super::{committed::Committed, present_or_record};
 use crate::{report::BlockReport, rpc::RpcClient};
 use alloy_consensus::{transaction::SignerRecoverable, Transaction};
 use alloy_primitives::Address;
@@ -16,9 +16,8 @@ pub(super) fn check_contract_creators(
     let endpoint = "ots_getContractCreator";
     for contract in committed.created_contracts() {
         let response = rpc.call::<Option<ContractCreator>>(endpoint, json!([contract]));
-        let Some(creator) = result_or_record(report, endpoint, None, response) else { continue };
-        let Some(creator) = creator else {
-            report.record(endpoint, None, format!("{contract} creator"), "a creator", "null");
+        let field = format!("{contract} creator");
+        let Some(creator) = present_or_record(report, endpoint, None, field, response) else {
             continue;
         };
 

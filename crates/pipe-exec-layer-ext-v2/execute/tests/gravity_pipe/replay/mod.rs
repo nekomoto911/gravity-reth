@@ -130,6 +130,22 @@ fn result_or_record<T>(
     response.map_err(|error| report.record(endpoint, tx_index, "response", "a result", error)).ok()
 }
 
+/// Returns a present result; records the endpoint's error, or a `null` result as `field`, and
+/// returns `None`.
+fn present_or_record<T>(
+    report: &mut BlockReport<'_>,
+    endpoint: &'static str,
+    tx_index: Option<usize>,
+    field: impl Into<String>,
+    response: Result<Option<T>, String>,
+) -> Option<T> {
+    let result = result_or_record(report, endpoint, tx_index, response)?;
+    if result.is_none() {
+        report.record(endpoint, tx_index, field, "a result", "null");
+    }
+    result
+}
+
 /// The endpoint reported exactly the block's transactions, in order.
 fn check_tx_hashes(
     report: &mut BlockReport<'_>,

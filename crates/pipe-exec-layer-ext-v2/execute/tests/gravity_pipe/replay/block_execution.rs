@@ -9,7 +9,7 @@
 
 use super::{
     committed::{ChangedState, Committed},
-    result_or_record,
+    present_or_record,
     revealed_state::{check_revealed_state, RevealedAccount},
 };
 use crate::{report::BlockReport, rpc::RpcClient};
@@ -53,9 +53,7 @@ pub(super) fn check_execution_outcome(
     committed: &ChangedState,
     response: Result<Option<ExecutionOutcome<Receipt>>, String>,
 ) {
-    let Some(outcome) = result_or_record(report, endpoint, None, response) else { return };
-    let Some(outcome) = outcome else {
-        report.record(endpoint, None, "response", "an execution outcome", "null");
+    let Some(outcome) = present_or_record(report, endpoint, None, "response", response) else {
         return;
     };
 

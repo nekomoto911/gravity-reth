@@ -1,6 +1,8 @@
 //! Whole-block traces: each transaction's trace must match its committed receipt.
 
-use super::{check_call_frame, check_tx_hashes, committed::Committed, result_or_record};
+use super::{
+    check_call_frame, check_tx_hashes, committed::Committed, present_or_record, result_or_record,
+};
 use crate::report::BlockReport;
 use alloy_rpc_types_trace::{
     common::TraceResult, geth::CallFrame, opcode::BlockOpcodeGas, parity::LocalizedTransactionTrace,
@@ -71,9 +73,7 @@ pub(super) fn check_opcode_gas(
     committed: &Committed,
     response: Result<Option<BlockOpcodeGas>, String>,
 ) {
-    let Some(opcode_gas) = result_or_record(report, endpoint, None, response) else { return };
-    let Some(opcode_gas) = opcode_gas else {
-        report.record(endpoint, None, "response", "a block", "null");
+    let Some(opcode_gas) = present_or_record(report, endpoint, None, "response", response) else {
         return;
     };
     report.check_eq(endpoint, None, "block hash", committed.hash, opcode_gas.block_hash);
