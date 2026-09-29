@@ -45,75 +45,6 @@ const MAINNET_EPOCH_INTERVAL: Duration = Duration::from_secs(2 * 60 * 60);
 /// 10^6 ether per test account: a transaction's worst case (30M gas at 100 gwei) costs 3 ether.
 const TEST_ACCOUNT_BALANCE_WEI: u128 = 1_000_000 * 10u128.pow(18);
 
-/// Hardforks the test chain walks through, in activation order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Fork {
-    Prague,
-    Alpha,
-    Beta,
-    Gamma,
-}
-
-impl Fork {
-    pub(crate) const ALL: [Self; 4] = [Self::Prague, Self::Alpha, Self::Beta, Self::Gamma];
-
-    fn genesis_key(self) -> &'static str {
-        match self {
-            Self::Prague => "pragueTime",
-            Self::Alpha => "alphaTime",
-            Self::Beta => "betaTime",
-            Self::Gamma => "gammaTime",
-        }
-    }
-
-    /// Whether the chain spec itself sees this block as the fork's activation block.
-    pub(crate) fn transitions_at(
-        self,
-        chain_spec: &ChainSpec,
-        block_ts: u64,
-        parent_ts: u64,
-    ) -> bool {
-        let condition = match self {
-            Self::Prague => chain_spec.fork(EthereumHardfork::Prague),
-            Self::Alpha => chain_spec.gravity_hardforks().fork(GravityHardfork::Alpha),
-            Self::Beta => chain_spec.gravity_hardforks().fork(GravityHardfork::Beta),
-            Self::Gamma => chain_spec.gravity_hardforks().fork(GravityHardfork::Gamma),
-        };
-        condition.transitions_at_timestamp(block_ts, parent_ts)
-    }
-}
-
-/// Where a block sits relative to the hardfork schedule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Phase {
-    /// Before the first hardfork of the timeline.
-    Genesis,
-    /// The first block at or after `fork`'s time.
-    Activation(Fork),
-    /// After `fork`'s activation block, before the next fork.
-    After(Fork),
-}
-
-impl Phase {
-    /// Whether `fork` is active in a block of this phase.
-    pub(crate) fn has_activated(self, fork: Fork) -> bool {
-        match self {
-            Self::Genesis => false,
-            Self::Activation(latest) | Self::After(latest) => latest >= fork,
-        }
-    }
-}
-
-impl fmt::Display for Phase {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Genesis => write!(f, "genesis"),
-            Self::Activation(fork) => write!(f, "{fork:?} activation"),
-            Self::After(fork) => write!(f, "after {fork:?}"),
-        }
-    }
-}
-
 /// Wall-clock hardfork schedule, fixed when the test starts.
 #[derive(Debug)]
 pub(crate) struct Timeline {
@@ -191,6 +122,75 @@ impl Timeline {
     /// Wall-clock second after which the timeline must have finished.
     pub(crate) fn deadline(&self) -> u64 {
         self.forks.last().unwrap().1 + LAST_PHASE_BUDGET.as_secs()
+    }
+}
+
+/// Hardforks the test chain walks through, in activation order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Fork {
+    Prague,
+    Alpha,
+    Beta,
+    Gamma,
+}
+
+impl Fork {
+    pub(crate) const ALL: [Self; 4] = [Self::Prague, Self::Alpha, Self::Beta, Self::Gamma];
+
+    fn genesis_key(self) -> &'static str {
+        match self {
+            Self::Prague => "pragueTime",
+            Self::Alpha => "alphaTime",
+            Self::Beta => "betaTime",
+            Self::Gamma => "gammaTime",
+        }
+    }
+
+    /// Whether the chain spec itself sees this block as the fork's activation block.
+    pub(crate) fn transitions_at(
+        self,
+        chain_spec: &ChainSpec,
+        block_ts: u64,
+        parent_ts: u64,
+    ) -> bool {
+        let condition = match self {
+            Self::Prague => chain_spec.fork(EthereumHardfork::Prague),
+            Self::Alpha => chain_spec.gravity_hardforks().fork(GravityHardfork::Alpha),
+            Self::Beta => chain_spec.gravity_hardforks().fork(GravityHardfork::Beta),
+            Self::Gamma => chain_spec.gravity_hardforks().fork(GravityHardfork::Gamma),
+        };
+        condition.transitions_at_timestamp(block_ts, parent_ts)
+    }
+}
+
+/// Where a block sits relative to the hardfork schedule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Phase {
+    /// Before the first hardfork of the timeline.
+    Genesis,
+    /// The first block at or after `fork`'s time.
+    Activation(Fork),
+    /// After `fork`'s activation block, before the next fork.
+    After(Fork),
+}
+
+impl Phase {
+    /// Whether `fork` is active in a block of this phase.
+    pub(crate) fn has_activated(self, fork: Fork) -> bool {
+        match self {
+            Self::Genesis => false,
+            Self::Activation(latest) | Self::After(latest) => latest >= fork,
+        }
+    }
+}
+
+impl fmt::Display for Phase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Genesis => write!(f, "genesis"),
+            Self::Activation(fork) => write!(f, "{fork:?} activation"),
+            Self::After(fork) => write!(f, "after {fork:?}"),
+        }
     }
 }
 

@@ -68,80 +68,6 @@ const UNSUPPORTED_JWK_TYPE: &str = "0x1::jwks::Unsupported_JWK";
 
 pub(crate) type Builder = WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, ChainSpec>>;
 
-/// Boots a fresh node on `genesis_json` and runs `run_fn` against it until it returns.
-pub(crate) fn run_node<F, Fut>(genesis_json: &str, datadir: &str, run_fn: F)
-where
-    F: FnOnce(Builder) -> Fut + Send + 'static,
-    Fut: Future<Output = eyre::Result<()>> + Send + 'static,
-{
-    init_panic_hook_and_tracer();
-
-    // The pipe starts from genesis, so leftovers of an earlier run must not survive.
-    if let Err(err) = std::fs::remove_dir_all(datadir) {
-        assert_eq!(err.kind(), ErrorKind::NotFound, "failed to clear {datadir}: {err}");
-    }
-
-    let runner = CliRunner::try_default_runtime().unwrap();
-    let command: NodeCommand<EthereumChainSpecParser> = NodeCommand::try_parse_args_from([
-        "reth",
-        "--chain",
-        genesis_json,
-        "--with-unused-ports",
-        "--dev",
-        "--datadir",
-        datadir,
-        // Replays are checked over HTTP with every namespace, like a mainnet RPC node.
-        "--http",
-        "--http.api",
-        "all",
-    ])
-    .unwrap();
-    runner
-        .run_command_until_exit(|ctx| {
-            command.execute(
-                ctx,
-                FnLauncher::new::<EthereumChainSpecParser, _>(|builder, _| async move {
-                    run_fn(builder).await
-                }),
-            )
-        })
-        .unwrap();
-
-    // Let the engine thread notice the closed pipe channel before the process tears down;
-    // otherwise it can abort on a destroyed pthread lock.
-    std::thread::sleep(Duration::from_secs(2));
-}
-
-/// What the test puts into the next block besides the protocol system transactions.
-#[derive(Debug, Default)]
-pub(crate) struct BlockInput {
-    pub(crate) timestamp_us: u64,
-    pub(crate) transactions: Vec<TransactionSigned>,
-    pub(crate) senders: Vec<Address>,
-    pub(crate) extra_data: Vec<ExtraDataType>,
-    /// Whether a pending DKG transcript may be delivered in this block. An epoch-change
-    /// block drops its user transactions, and mainnet never changes epoch on a hardfork
-    /// activation block.
-    pub(crate) may_change_epoch: bool,
-}
-
-/// A block the pipe executed, committed, and persisted.
-#[derive(Debug)]
-pub(crate) struct CommittedBlock {
-    pub(crate) number: u64,
-    /// gravity-sdk block id of the parent.
-    pub(crate) parent_id: B256,
-    /// Block hash the pipe reported for this block.
-    pub(crate) hash: B256,
-    /// Seconds, as in the header.
-    pub(crate) timestamp: u64,
-    /// Microseconds, as passed to `onBlockStart`; the header keeps only seconds.
-    pub(crate) timestamp_us: u64,
-    /// Epoch after this block.
-    pub(crate) epoch: u64,
-    pub(crate) epoch_changed: bool,
-}
-
 /// Mock consensus in front of the pipe execution layer.
 pub(crate) struct Node<Storage, EthApi> {
     pipe: PipeExecLayerApi<Storage, EthApi>,
@@ -312,6 +238,80 @@ where
         };
         ExtraDataType::DKG(bcs::to_bytes(&transcript).unwrap())
     }
+}
+
+/// Boots a fresh node on `genesis_json` and runs `run_fn` against it until it returns.
+pub(crate) fn run_node<F, Fut>(genesis_json: &str, datadir: &str, run_fn: F)
+where
+    F: FnOnce(Builder) -> Fut + Send + 'static,
+    Fut: Future<Output = eyre::Result<()>> + Send + 'static,
+{
+    init_panic_hook_and_tracer();
+
+    // The pipe starts from genesis, so leftovers of an earlier run must not survive.
+    if let Err(err) = std::fs::remove_dir_all(datadir) {
+        assert_eq!(err.kind(), ErrorKind::NotFound, "failed to clear {datadir}: {err}");
+    }
+
+    let runner = CliRunner::try_default_runtime().unwrap();
+    let command: NodeCommand<EthereumChainSpecParser> = NodeCommand::try_parse_args_from([
+        "reth",
+        "--chain",
+        genesis_json,
+        "--with-unused-ports",
+        "--dev",
+        "--datadir",
+        datadir,
+        // Replays are checked over HTTP with every namespace, like a mainnet RPC node.
+        "--http",
+        "--http.api",
+        "all",
+    ])
+    .unwrap();
+    runner
+        .run_command_until_exit(|ctx| {
+            command.execute(
+                ctx,
+                FnLauncher::new::<EthereumChainSpecParser, _>(|builder, _| async move {
+                    run_fn(builder).await
+                }),
+            )
+        })
+        .unwrap();
+
+    // Let the engine thread notice the closed pipe channel before the process tears down;
+    // otherwise it can abort on a destroyed pthread lock.
+    std::thread::sleep(Duration::from_secs(2));
+}
+
+/// What the test puts into the next block besides the protocol system transactions.
+#[derive(Debug, Default)]
+pub(crate) struct BlockInput {
+    pub(crate) timestamp_us: u64,
+    pub(crate) transactions: Vec<TransactionSigned>,
+    pub(crate) senders: Vec<Address>,
+    pub(crate) extra_data: Vec<ExtraDataType>,
+    /// Whether a pending DKG transcript may be delivered in this block. An epoch-change
+    /// block drops its user transactions, and mainnet never changes epoch on a hardfork
+    /// activation block.
+    pub(crate) may_change_epoch: bool,
+}
+
+/// A block the pipe executed, committed, and persisted.
+#[derive(Debug)]
+pub(crate) struct CommittedBlock {
+    pub(crate) number: u64,
+    /// gravity-sdk block id of the parent.
+    pub(crate) parent_id: B256,
+    /// Block hash the pipe reported for this block.
+    pub(crate) hash: B256,
+    /// Seconds, as in the header.
+    pub(crate) timestamp: u64,
+    /// Microseconds, as passed to `onBlockStart`; the header keeps only seconds.
+    pub(crate) timestamp_us: u64,
+    /// Epoch after this block.
+    pub(crate) epoch: u64,
+    pub(crate) epoch_changed: bool,
 }
 
 /// Accounts the test signs user transactions for. Keys derive from fixed seeds, so every
