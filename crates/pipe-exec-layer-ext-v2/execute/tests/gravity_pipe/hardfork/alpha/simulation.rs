@@ -22,6 +22,7 @@
 use crate::{
     hardfork::Chain,
     node::{legacy_tx, CommittedBlock, TestAccount},
+    replay::call_tracer_options,
     report::BlockReport,
 };
 use alloy_consensus::TxLegacy;
@@ -311,7 +312,8 @@ impl Endpoint {
                 chain.request::<Bytes>("eth_call", json!([call, number, state_override])).map(drop)
             }
             Self::DebugTraceCall => {
-                let options = json!({ "tracer": "callTracer", "stateOverrides": state_override });
+                let mut options = call_tracer_options();
+                options["stateOverrides"] = state_override;
                 let frame: CallFrame =
                     chain.request("debug_traceCall", json!([call, number, options]))?;
                 frame.error.map_or(Ok(()), Err)

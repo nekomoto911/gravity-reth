@@ -101,7 +101,7 @@ pub(crate) fn check_block<P>(
 /// Geth-style traces use the call tracer: its root frame carries the transaction's gas
 /// used and error. The default struct-log tracer carries the same two values but logs
 /// every opcode, which makes a replay of a system transaction take seconds.
-fn call_tracer_options() -> Value {
+pub(crate) fn call_tracer_options() -> Value {
     json!({ "tracer": "callTracer" })
 }
 

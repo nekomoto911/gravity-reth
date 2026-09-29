@@ -17,6 +17,7 @@ use crate::{
         Chain, ScenarioBlock,
     },
     node::{eip1559_tx, CommittedBlock, TestAccount},
+    replay::call_tracer_options,
     report::BlockReport,
 };
 use alloy_consensus::{TrieAccount, TxEip1559};
@@ -189,8 +190,9 @@ fn check_calls_at(
     };
 
     let endpoint = "debug_traceCall";
-    let options =
-        json!({ "tracer": "callTracer", "stateOverrides": reader, "txIndex": U64::from(index) });
+    let mut options = call_tracer_options();
+    options["stateOverrides"] = reader.clone();
+    options["txIndex"] = json!(U64::from(index));
     let output = chain
         .request::<CallFrame>(endpoint, json!([read_a, block.hash, options]))
         .map(|frame| frame.output);
@@ -206,7 +208,8 @@ fn check_calls_at(
     check_balance(report, endpoint, index, expected_balance, output);
 
     let endpoint = "debug_traceCallMany";
-    let options = json!({ "tracer": "callTracer", "stateOverrides": reader });
+    let mut options = call_tracer_options();
+    options["stateOverrides"] = reader;
     let output = chain.request::<Vec<Vec<CallFrame>>>(endpoint, json!([bundles, at, options])).map(
         |mut frames| {
             frames.pop().and_then(|mut bundle| bundle.pop()).and_then(|frame| frame.output)
