@@ -78,7 +78,7 @@ impl Prague {
         report: &mut BlockReport<'_>,
     ) {
         if self.activation.is_some_and(|activation| block.number >= activation) {
-            let stored = if block.epoch_changed { B256::ZERO } else { block.parent_id };
+            let stored = eip2935_parent_id(block).unwrap_or(B256::ZERO);
             self.stored_ids.insert(block.number - 1, stored);
         }
         if let Some(expected) = self.expected.take() {
@@ -98,6 +98,17 @@ impl Prague {
             "Prague scenario blocks (before activation, activation, after activation) did not \
              all run"
         );
+    }
+}
+
+/// What `block`'s EIP-2935 system call stores for its parent once Prague is active: the parent's
+/// consensus id. An epoch-change block runs only its system transactions, never the executor
+/// that makes the call, so it stores nothing.
+pub(crate) const fn eip2935_parent_id(block: &CommittedBlock) -> Option<B256> {
+    if block.epoch_changed {
+        None
+    } else {
+        Some(block.parent_id)
     }
 }
 

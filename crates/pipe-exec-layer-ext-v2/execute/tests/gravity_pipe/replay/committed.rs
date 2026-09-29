@@ -2,6 +2,7 @@
 //! storage: the baseline every replay is compared against.
 
 use crate::{
+    hardfork::eip2935_parent_id,
     node::CommittedBlock,
     timeline::{Fork, Phase},
 };
@@ -66,7 +67,7 @@ impl Committed {
             tx_hashes,
             receipts,
             state: ChangedState::read(provider, number..=number),
-            outside_writes: written_outside_transactions(phase, pipe_block.epoch_changed),
+            outside_writes: written_outside_transactions(phase, pipe_block),
             writes_after_transactions: written_after_transactions(phase),
         }
     }
@@ -195,7 +196,7 @@ pub(super) struct PostAccount {
 
 /// Account fields the chain writes outside the block's transactions, so no per-transaction
 /// state diff can reveal them. Each write is scoped to the blocks that make it.
-fn written_outside_transactions(phase: Phase, epoch_changed: bool) -> Vec<(Address, Field)> {
+fn written_outside_transactions(phase: Phase, block: &CommittedBlock) -> Vec<(Address, Field)> {
     let mut writes = Vec::new();
     // `eip_2935::apply_state_changes_for_block` deploys the block hash contract (nonce 1,
     // code) before the first transaction of the Prague activation block.
@@ -206,14 +207,13 @@ fn written_outside_transactions(phase: Phase, epoch_changed: bool) -> Vec<(Addre
         ]);
     }
     // From then on the executor's pre-execution system call stores the parent id in the block
-    // hash contract. An epoch-change block is assembled from its system transactions alone and
-    // never runs the executor, so it writes no slot.
-    if phase.has_activated(Fork::Prague) && !epoch_changed {
+    // hash contract, except on an epoch-change block.
+    if phase.has_activated(Fork::Prague) && eip2935_parent_id(block).is_some() {
         writes.push((HISTORY_STORAGE_ADDRESS, Field::Storage));
     }
     // A pre-Alpha DKG epoch-change block executes `onBlockStart`, which updates the global
     // time, but keeps only the DKG transaction in its body.
-    if epoch_changed && !phase.has_activated(Fork::Alpha) {
+    if block.epoch_changed && !phase.has_activated(Fork::Alpha) {
         writes.push((TIMESTAMP_ADDR, Field::Storage));
     }
     // `system_caller_migration` zeroes SYSTEM_CALLER's balance before the first transaction

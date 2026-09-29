@@ -15,6 +15,7 @@ mod gamma;
 mod prague;
 
 pub(crate) use chain::Chain;
+pub(crate) use prague::eip2935_parent_id;
 
 use crate::{
     node::{BlockInput, CommittedBlock, SignedTx},
