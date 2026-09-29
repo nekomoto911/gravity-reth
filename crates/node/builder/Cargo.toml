@@ -39,6 +39,7 @@ reth-node-core.workspace = true
 reth-node-events.workspace = true
 reth-node-metrics.workspace = true
 reth-payload-builder.workspace = true
+reth-pipe-exec-layer-event-bus.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
 reth-prune.workspace = true

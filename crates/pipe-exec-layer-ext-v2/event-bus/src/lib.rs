@@ -101,6 +101,22 @@ impl<N: NodePrimitives> PipeExecLayerEventBus<N> {
     }
 }
 
+/// Node primitives the pipe execution layer can drive.
+///
+/// The event bus is a single global instance bound to concrete primitives, while the engine tree
+/// is generic over [`NodePrimitives`]. Requiring this trait on the tree turns a primitives
+/// mismatch into a compile error instead of a runtime type check.
+pub trait PipeExecPrimitives: NodePrimitives {
+    /// Returns the global event bus carrying events of these primitives.
+    fn pipe_exec_layer_event_bus() -> &'static PipeExecLayerEventBus<Self>;
+}
+
+impl PipeExecPrimitives for EthPrimitives {
+    fn pipe_exec_layer_event_bus() -> &'static PipeExecLayerEventBus<Self> {
+        get_pipe_exec_layer_event_bus()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
