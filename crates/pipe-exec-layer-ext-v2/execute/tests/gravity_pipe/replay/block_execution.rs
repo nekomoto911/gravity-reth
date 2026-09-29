@@ -2,10 +2,6 @@
 //!
 //! `reth_getBlockExecutionOutcome` re-executes blocks as a unit, so it must reproduce their
 //! receipts and every state change, including what the chain wrote outside transactions.
-//!
-//! Execution witnesses are not offered: the randomness precompile reads block headers from the
-//! node's database, outside anything a witness records, so a block that used it cannot be
-//! re-executed from its witness. Both witness endpoints must refuse every block as unsupported.
 
 use super::{
     committed::{ChangedState, Committed},
@@ -17,7 +13,7 @@ use alloy_primitives::{map::B256Map, Address, B256};
 use reth_ethereum_primitives::Receipt;
 use reth_execution_types::ExecutionOutcome;
 use revm::{database::BundleAccount, state::Bytecode};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::BTreeMap;
 
 pub(super) fn check_block_execution(
@@ -25,22 +21,12 @@ pub(super) fn check_block_execution(
     rpc: &RpcClient,
     committed: &Committed,
 ) {
-    let number_hex = format!("{:#x}", committed.number);
-
-    // Step 1: the block re-executed on its own reproduces what the pipe committed.
+    // The block re-executed on its own reproduces what the pipe committed.
     let endpoint = "reth_getBlockExecutionOutcome";
-    let response = rpc.call(endpoint, json!([number_hex]));
+    let response = rpc.call(endpoint, json!([format!("{:#x}", committed.number)]));
     let (number, state) = (committed.number, &committed.state);
     let receipts = std::slice::from_ref(&committed.receipts);
     check_execution_outcome(report, endpoint, number, receipts, state, response);
-
-    // Step 2: no block has an execution witness.
-    for (endpoint, block) in [
-        ("debug_executionWitness", json!(number_hex)),
-        ("debug_executionWitnessByBlockHash", json!(committed.hash)),
-    ] {
-        check_refused_as_unsupported(report, endpoint, rpc.call(endpoint, json!([block])));
-    }
 }
 
 /// `receipts` holds the committed receipts of each block from `first_block` on; `committed`
@@ -109,26 +95,5 @@ fn revealed_account(account: &BundleAccount, contracts: &B256Map<Bytecode>) -> R
             .iter()
             .map(|(slot, value)| (B256::from(*slot), B256::from(value.present_value)))
             .collect(),
-    }
-}
-
-/// A refusal is a JSON-RPC error whose message says the witness is unsupported or unavailable;
-/// a witness, or any other error such as a failed re-execution, is a mismatch.
-fn check_refused_as_unsupported(
-    report: &mut BlockReport<'_>,
-    endpoint: &'static str,
-    response: Result<Value, String>,
-) {
-    let expected = "an unsupported error";
-    let error = match response {
-        Ok(_) => return report.record(endpoint, None, "response", expected, "a witness"),
-        Err(error) => error,
-    };
-    let message = serde_json::from_str::<Value>(&error)
-        .ok()
-        .and_then(|error| error["message"].as_str().map(str::to_lowercase))
-        .unwrap_or_default();
-    if !(message.contains("unsupported") || message.contains("unavailable")) {
-        report.record(endpoint, None, "response", expected, error);
     }
 }

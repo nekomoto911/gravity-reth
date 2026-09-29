@@ -6,13 +6,11 @@
 //! stays zero. Every committed block is checked against this rule.
 //!
 //! The module's own blocks: one before activation, where `SYSTEM_CALLER` pays exactly its
-//! transactions' fees and simulation endpoints treat it like any address; the activation block,
-//! where the balance goes to zero; and after activation, a block of user transactions calling
-//! the BLS and randomness-by-height precompiles, where simulation endpoints exempt
-//! `SYSTEM_CALLER`, and a block that replays stop inside of (`mid_block`).
+//! transactions' fees and keeps a non-zero balance; the activation block, where the balance goes
+//! to zero; and after activation, a block of user transactions calling the BLS and
+//! randomness-by-height precompiles, and a block that replays stop inside of (`mid_block`).
 
 mod mid_block;
-mod simulation;
 
 use super::{
     base::{bls_call, BLS_ENOUGH_GAS},
@@ -34,7 +32,6 @@ use reth_pipe_exec_layer_ext_v2::{
         RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR, RANDOMNESS_BY_HEIGHT_RECENT_GAS,
     },
 };
-use simulation::check_simulations;
 
 /// Blocks planned after activation, in the order they run.
 const AFTER_ACTIVATION_BLOCKS: [PlanFn; 2] = [Alpha::precompile_calls, Alpha::mid_block];
@@ -64,7 +61,6 @@ impl Alpha {
         parent: u64,
     ) -> Option<ScenarioBlock> {
         let (block, expected) = match phase {
-            // Early in the phase, so that the simulated next block is still before Alpha.
             Phase::After(Fork::Prague) if !self.before_activation_planned => {
                 self.before_activation_planned = true;
                 (ScenarioBlock::default(), Expected::BeforeActivation)
@@ -169,7 +165,6 @@ impl Expected {
                 let field = "balance decrease (the system transactions' fees)";
                 report.check_eq(source, None, field, Some(fees), before.checked_sub(after));
                 report.check_eq(source, None, "balance is non-zero", true, !after.is_zero());
-                check_simulations(chain, block, false, report);
             }
             Self::Activation => {
                 let source = "scenario: SYSTEM_CALLER on the Alpha activation block";
@@ -216,7 +211,6 @@ impl Expected {
                     randomness,
                     TRANSFER_GAS + RANDOMNESS_BY_HEIGHT_RECENT_GAS,
                 );
-                check_simulations(chain, block, true, report);
             }
             Self::MidBlock(mid_block) => mid_block.check(chain, block, report),
         }

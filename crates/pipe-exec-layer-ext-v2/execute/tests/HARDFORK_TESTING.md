@@ -36,7 +36,7 @@ timeline, and the test fails once at the end with every one of them.
 | `gravity_pipe/replay/` | The replay check, one module per endpoint class |
 | `gravity_pipe/hardfork/mod.rs` | `Scenarios`: dispatches every block to the scenario modules |
 | `gravity_pipe/hardfork/base.rs` | Scenarios that do not depend on a hardfork |
-| `gravity_pipe/hardfork/{prague,alpha,beta,gamma}.rs` | One module per hardfork (`alpha/` holds Alpha's simulation and mid-block scenarios; `gamma.rs` has no scenarios yet) |
+| `gravity_pipe/hardfork/{prague,alpha,beta,gamma}.rs` | One module per hardfork (`alpha/` holds Alpha's mid-block scenario; `gamma.rs` has no scenarios yet) |
 | `gravity_pipe/hardfork/chain.rs` | `Chain`: reads of the committed chain for scenarios |
 | `gravity_pipe/mainnet_genesis.json` | Gravity mainnet genesis, byte-identical to `gravity-sdk/genesis/mainnet/genesis.json` |
 
@@ -103,12 +103,12 @@ over HTTP JSON-RPC, as on a mainnet RPC node (the node runs with `--http --http.
 
 | Class | Endpoints | Compared with the committed block |
 |-------|-----------|-----------------------------------|
-| Whole-block traces | `debug_traceBlockByHash`, `debug_traceBlockByNumber`, `debug_traceBlock` (call tracer); `trace_block`, `trace_filter`; `trace_replayBlockTransactions` (`trace` + `stateDiff`); `trace_blockOpcodeGas` | Geth-style traces: each transaction's gas used and success; parity-style traces: success; opcode gas: transaction hashes; state diffs folded in block order reach the committed post-block state |
+| Whole-block traces | `debug_traceBlockByHash`, `debug_traceBlockByNumber` (call tracer); `trace_block`, `trace_filter`; `trace_replayBlockTransactions` (`trace` + `stateDiff`); `trace_blockOpcodeGas` | Geth-style traces: each transaction's gas used and success; parity-style traces: success; opcode gas: transaction hashes; state diffs folded in block order reach the committed post-block state |
 | Intermediate roots | `debug_intermediateRoots` | One root per transaction; the last is the committed state root, unless the chain writes state after the block's last transaction |
 | Single transaction | `debug_traceTransaction`, `trace_replayTransaction`, `trace_transaction`, `trace_get`, `trace_transactionOpcodeGas`, `ots_traceTransaction`, `ots_getInternalOperations`, `ots_getTransactionError` | Each transaction's receipt (gas, success, revert output), as far as the endpoint exposes it |
 | Contract creators | `ots_getContractCreator` | Every created contract names its creating transaction and creator |
 | Mid-block | `debug_accountAt`, `debug_accountInfoAt`, `debug_traceCall` (`txIndex`), `eth_callMany`, `debug_traceCallMany` | The committed state at that position inside the block |
-| Block execution | `reth_getBlockExecutionOutcome`; `debug_executionWitness`, `debug_executionWitnessByBlockHash` | Receipts and every state change, including writes outside transactions; witnesses must be refused as unsupported |
+| Block execution | `reth_getBlockExecutionOutcome` | Receipts and every state change, including writes outside transactions |
 
 Once the timeline is done, `replay::check_blocks` also replays spans of many blocks in one call
 (`trace_filter`, `reth_getBlockExecutionOutcome` over ranges).

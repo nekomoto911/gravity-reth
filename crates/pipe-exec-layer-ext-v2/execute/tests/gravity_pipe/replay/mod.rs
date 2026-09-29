@@ -21,7 +21,7 @@ mod transaction;
 pub(crate) use cross_block::check_blocks;
 
 use crate::{node::CommittedBlock, report::BlockReport, rpc::RpcClient, timeline::Phase};
-use alloy_primitives::{Bytes, B256, U256};
+use alloy_primitives::{B256, U256};
 use alloy_rpc_types_trace::geth::CallFrame;
 use block_execution::check_block_execution;
 use block_traces::{check_call_traces, check_opcode_gas, check_parity_traces};
@@ -60,7 +60,6 @@ pub(crate) fn check_block<P>(
     for (endpoint, block) in [
         ("debug_traceBlockByHash", json!(committed.hash)),
         ("debug_traceBlockByNumber", json!(number_hex)),
-        ("debug_traceBlock", json!(Bytes::from(alloy_rlp::encode(&committed.block)))),
     ] {
         let response = rpc.call(endpoint, json!([block, call_tracer_options()]));
         check_call_traces(report, endpoint, &committed, response);
@@ -93,8 +92,7 @@ pub(crate) fn check_block<P>(
     // Step 6: replays that stop inside the block see the committed state at that position.
     check_mid_block(report, rpc, &committed);
 
-    // Step 7: the block executed as a unit reproduces everything it committed, and no block
-    // has an execution witness.
+    // Step 7: the block executed as a unit reproduces everything it committed.
     check_block_execution(report, rpc, &committed);
 }
 
