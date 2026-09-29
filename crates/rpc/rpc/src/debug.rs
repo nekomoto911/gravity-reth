@@ -23,7 +23,7 @@ use reth_evm::{block::BlockExecutor, ConfigureEvm, EvmEnvFor};
 use reth_primitives_traits::{
     Block as BlockTrait, BlockBody, BlockTy, ReceiptWithBloom, RecoveredBlock,
 };
-use reth_rpc_api::DebugApiServer;
+use reth_rpc_api::{DebugApiServer, RpcTrieUpdatesV2};
 use reth_rpc_convert::RpcTxReq;
 use reth_rpc_eth_api::{
     helpers::{EthTransactions, TraceExt},
@@ -37,7 +37,7 @@ use reth_storage_api::{
     TransactionVariant,
 };
 use reth_tasks::{pool::BlockingTaskGuard, Runtime};
-use reth_trie_common::{updates::TrieUpdates, HashedPostState, HashedStorage};
+use reth_trie_common::{HashedPostState, HashedStorage};
 use revm::{database::states::bundle_state::BundleRetention, Database, DatabaseCommit};
 use revm_inspectors::tracing::{DebugInspector, TransactionContext};
 use serde::{Deserialize, Serialize};
@@ -647,8 +647,10 @@ where
                 })
             })
             .unwrap_or_default();
-        let storage_root =
-            db.database.storage_root(address, hashed_storage).map_err(Eth::Error::from_eth_err)?;
+        let storage_root = db
+            .database
+            .storage_root_v2(address, hashed_storage)
+            .map_err(Eth::Error::from_eth_err)?;
 
         Ok(Some(Account { balance, nonce, code_hash, storage_root }))
     }
@@ -693,7 +695,7 @@ where
         &self,
         hashed_state: HashedPostState,
         block_id: Option<BlockId>,
-    ) -> Result<(B256, TrieUpdates), Eth::Error> {
+    ) -> Result<(B256, RpcTrieUpdatesV2), Eth::Error> {
         self.inner
             .eth_api
             .spawn_blocking_io(move |this| {
@@ -701,7 +703,10 @@ where
                     .provider()
                     .state_by_block_id(block_id.unwrap_or_default())
                     .map_err(Eth::Error::from_eth_err)?;
-                state.state_root_with_updates(hashed_state).map_err(Eth::Error::from_eth_err)
+                let (root, updates) = state
+                    .state_root_with_updates_v2(hashed_state)
+                    .map_err(Eth::Error::from_eth_err)?;
+                Ok((root, updates.into()))
             })
             .await
     }
@@ -733,8 +738,10 @@ where
                     db.merge_transitions(BundleRetention::PlainState);
                     // Compute state root from the accumulated state changes
                     let hashed_state = db.database.hashed_post_state(&db.bundle_state);
-                    let root =
-                        db.database.state_root(hashed_state).map_err(Eth::Error::from_eth_err)?;
+                    let root = db
+                        .database
+                        .state_root_v2(hashed_state)
+                        .map_err(Eth::Error::from_eth_err)?;
                     roots.push(root);
                 }
 
@@ -1136,7 +1143,7 @@ where
         &self,
         hashed_state: HashedPostState,
         block_id: Option<BlockId>,
-    ) -> RpcResult<(B256, TrieUpdates)> {
+    ) -> RpcResult<(B256, RpcTrieUpdatesV2)> {
         Self::debug_state_root_with_updates(self, hashed_state, block_id).await.map_err(Into::into)
     }
 
