@@ -18,6 +18,7 @@ use reth_engine_primitives::BeaconEngineMessage;
 use reth_evm::ConfigureEvm;
 use reth_network_p2p::BlockClient;
 use reth_payload_builder::PayloadBuilderHandle;
+use reth_pipe_exec_layer_event_bus::PipeExecPrimitives;
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
     providers::{BlockchainProvider, ProviderNodeTypes},
@@ -75,7 +76,7 @@ pub fn build_engine_orchestrator<N, Client, S, V, C>(
     PipelineSync<N>,
 >
 where
-    N: ProviderNodeTypes,
+    N: ProviderNodeTypes<Primitives: PipeExecPrimitives>,
     Client: BlockClient<Block = <N::Primitives as NodePrimitives>::Block> + 'static,
     S: Stream<Item = BeaconEngineMessage<N::Payload>> + Send + Sync + Unpin + 'static,
     V: EngineValidator<N::Payload> + WaitForCaches,

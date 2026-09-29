@@ -34,6 +34,7 @@ use reth_node_core::{
     primitives::Head,
 };
 use reth_node_events::node;
+use reth_pipe_exec_layer_event_bus::PipeExecPrimitives;
 use reth_provider::{
     providers::{BlockchainProvider, NodeTypesForProvider},
     BlockNumReader, StorageSettingsCache,
@@ -71,7 +72,7 @@ impl EngineNodeLauncher {
         target: NodeBuilderWithComponents<T, CB, AO>,
     ) -> eyre::Result<NodeHandle<NodeAdapter<T, CB::Components>, AO>>
     where
-        N: Node<RethFullAdapter<DB, N>> + NodeTypesForProvider,
+        N: Node<RethFullAdapter<DB, N>> + NodeTypesForProvider<Primitives: PipeExecPrimitives>,
         DB: Database + DatabaseMetrics + Clone + Unpin + 'static,
         T: FullNodeTypes<
             Types = N,
@@ -468,7 +469,7 @@ where
         DB = DB,
         Provider = BlockchainProvider<NodeTypesWithDBAdapter<N, DB>>,
     >,
-    N: Node<RethFullAdapter<DB, N>> + NodeTypesForProvider,
+    N: Node<RethFullAdapter<DB, N>> + NodeTypesForProvider<Primitives: PipeExecPrimitives>,
     DB: Database + DatabaseMetrics + Clone + Unpin + 'static,
     CB: NodeComponentsBuilder<T> + 'static,
     AO: RethRpcAddOns<NodeAdapter<T, CB::Components>>

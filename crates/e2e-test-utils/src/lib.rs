@@ -11,6 +11,7 @@ use reth_node_builder::{
     FullNodeTypesAdapter, Node, NodeAdapter, NodeComponents, NodeTypes, NodeTypesWithDBAdapter,
     PayloadTypes,
 };
+use reth_pipe_exec_layer_event_bus::PipeExecPrimitives;
 use reth_provider::providers::{BlockchainProvider, NodeTypesForProvider};
 use std::sync::Arc;
 use wallet::Wallet;
@@ -146,8 +147,10 @@ pub type NodeHelperType<N, Provider = BlockchainProvider<NodeTypesWithDBAdapter<
 pub trait NodeBuilderHelper
 where
     Self: Default
-        + NodeTypesForProvider<Payload: PayloadTypes<PayloadAttributes: From<PayloadAttributes>>>
-        + Node<
+        + NodeTypesForProvider<
+            Payload: PayloadTypes<PayloadAttributes: From<PayloadAttributes>>,
+            Primitives: PipeExecPrimitives,
+        > + Node<
             TmpNodeAdapter<Self, BlockchainProvider<NodeTypesWithDBAdapter<Self, TmpDB>>>,
             ComponentsBuilder: NodeComponentsBuilder<
                 TmpNodeAdapter<Self, BlockchainProvider<NodeTypesWithDBAdapter<Self, TmpDB>>>,
@@ -168,8 +171,10 @@ where
 
 impl<T> NodeBuilderHelper for T where
     Self: Default
-        + NodeTypesForProvider<Payload: PayloadTypes<PayloadAttributes: From<PayloadAttributes>>>
-        + Node<
+        + NodeTypesForProvider<
+            Payload: PayloadTypes<PayloadAttributes: From<PayloadAttributes>>,
+            Primitives: PipeExecPrimitives,
+        > + Node<
             TmpNodeAdapter<Self, BlockchainProvider<NodeTypesWithDBAdapter<Self, TmpDB>>>,
             ComponentsBuilder: NodeComponentsBuilder<
                 TmpNodeAdapter<Self, BlockchainProvider<NodeTypesWithDBAdapter<Self, TmpDB>>>,
