@@ -480,9 +480,11 @@ impl BridgeDeposits {
     }
 }
 
-/// gravity-sdk block ids are opaque; the test derives them from the block number.
+/// gravity-sdk block ids are opaque; the test derives them from the block number. Hashed rather
+/// than the number itself, so a stored id never reads like a stored number, and salted, so it
+/// differs from the block's randomness (`keccak256(number)`).
 fn mock_block_id(number: u64) -> B256 {
-    B256::left_padding_from(&number.to_be_bytes())
+    keccak256([b"gravity_pipe block id".as_slice(), &number.to_be_bytes()].concat())
 }
 
 async fn active_validator_address<EthApi>(eth_api: &EthApi, validator_index: u64) -> Address
