@@ -47,7 +47,9 @@ pub trait GetBlockAccessList: Trace + Call + LoadBlock + RpcNodeCoreExt {
                     .build();
 
                 let block_txs = block.transactions_recovered();
-                let mut executor = RpcNodeCore::evm_config(&eth_api)
+                // A committed block: replay it with the chain's block-level steps.
+                let evm_config = RpcNodeCore::evm_config(&eth_api).chain_block_mode();
+                let mut executor = evm_config
                     .executor_for_block(&mut db, block.sealed_block())
                     .map_err(RethError::other)
                     .map_err(Self::Error::from_eth_err)?;

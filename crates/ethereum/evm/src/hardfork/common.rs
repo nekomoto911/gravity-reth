@@ -9,7 +9,7 @@ use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use reth_evm::{execute::BlockExecutionError, ParallelDatabase};
 use revm::{
     bytecode::Bytecode,
-    state::{Account, AccountStatus, EvmState, EvmStorageSlot, TransactionId},
+    state::{Account, AccountInfo, AccountStatus, EvmState, EvmStorageSlot, TransactionId},
     DatabaseCommit, DatabaseRef,
 };
 
@@ -158,4 +158,52 @@ pub fn apply_hardfork_upgrades<H: HardforkUpgrades, DB: ParallelDatabase>(
     // 4. Commit all changes atomically
     state.commit(hardfork_changes);
     Ok(())
+}
+
+/// Account reads and irregular state writes used by the one-shot Gravity hardfork changes.
+///
+/// Both the pipe (through its grevm
+/// [`ParallelExecutor`](reth_evm::parallel_execute::ParallelExecutor)) and the RPC replay executor
+/// (through [`DbHardforkState`]) apply the same functions through this interface, so a committed
+/// block and its replay share one implementation.
+pub trait HardforkState {
+    /// Reads the current account info of `address`.
+    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, BlockExecutionError>;
+
+    /// Commits `state_diff` outside of any transaction.
+    fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), BlockExecutionError>;
+}
+
+impl<T> HardforkState for T
+where
+    T: reth_evm::parallel_execute::ParallelExecutor<
+            Primitives = reth_ethereum_primitives::EthPrimitives,
+            Error = BlockExecutionError,
+        > + ?Sized,
+{
+    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, BlockExecutionError> {
+        reth_evm::parallel_execute::ParallelExecutor::basic(self, address)
+    }
+
+    fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), BlockExecutionError> {
+        reth_evm::parallel_execute::ParallelExecutor::apply_state_change(self, state_diff)
+    }
+}
+
+/// [`HardforkState`] over a plain database, as used by a block executor's EVM.
+#[derive(Debug)]
+pub struct DbHardforkState<'a, DB>(pub &'a mut DB);
+
+impl<DB> HardforkState for DbHardforkState<'_, DB>
+where
+    DB: alloy_evm::Database + DatabaseCommit,
+{
+    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, BlockExecutionError> {
+        self.0.basic(address).map_err(BlockExecutionError::other)
+    }
+
+    fn apply_state_change(&mut self, state_diff: EvmState) -> Result<(), BlockExecutionError> {
+        self.0.commit(state_diff);
+        Ok(())
+    }
 }

@@ -3,13 +3,7 @@
 
 use core::fmt;
 
-use super::{
-    pre_alpha_epoch_block::{
-        active_validator_index, is_pre_alpha_dkg_epoch_block, on_block_start_txn,
-        written_timestamp_micros,
-    },
-    LoadBlock, LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace,
-};
+use super::{LoadBlock, LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace};
 use crate::{
     helpers::estimate::EstimateCall, FromEvmError, FullEthApiTypes, RpcBlock, RpcNodeCore,
 };
@@ -23,20 +17,12 @@ use alloy_rpc_types_eth::{
     state::{EvmOverrides, StateOverride},
     BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
-use alloy_sol_types::SolCall;
 use futures::Future;
-use reth_chainspec::{
-    gravity_system_contracts::{
-        getActiveValidatorsCall, NIL_PROPOSER_INDEX, VALIDATOR_MANAGER_ADDR,
-    },
-    is_gravity_system_caller, is_system_tx_gas_exempt, ChainSpecProvider, EthChainSpec,
-    EthereumHardforks, SYSTEM_CALLER,
-};
+use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
-    block::BlockExecutor, env::BlockEnvironment, execute::BlockBuilder,
-    precompiles::PrecompilesMap, ConfigureEvm, Evm, EvmEnvFor, HaltReasonFor, InspectorFor,
-    TransactionEnvMut, TxEnvFor,
+    block::BlockExecutor, env::BlockEnvironment, execute::BlockBuilder, ConfigureEvm, Evm,
+    EvmEnvFor, HaltReasonFor, InspectorFor, TransactionEnvMut, TxEnvFor,
 };
 use reth_node_api::BlockBody;
 use reth_primitives_traits::{Recovered, RecoveredBlock};
@@ -209,22 +195,13 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         }
                     };
 
-                    let block_number = evm_env.block_env.number();
-                    let block_timestamp = evm_env.block_env.timestamp();
-                    let current_randomness = evm_env.block_env.prevrandao();
                     let (result, results) = if trace_transfers {
                         // prepare inspector to capture transfer inside the evm so they are recorded
                         // and included in logs
                         let inspector = TransferInspector::new(false).with_logs(true);
-                        let mut evm = this
+                        let evm = this
                             .evm_config()
                             .evm_with_env_and_inspector(&mut db, evm_env, inspector);
-                        this.register_custom_precompiles(
-                            &mut evm,
-                            block_number,
-                            block_timestamp,
-                            current_randomness,
-                        );
                         let mut builder = this.evm_config().create_block_builder(evm, &parent, ctx);
 
                         if let Some(ref state_overrides) = state_overrides {
@@ -246,13 +223,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         )
                         .map_err(map_err)?
                     } else {
-                        let mut evm = this.evm_config().evm_with_env(&mut db, evm_env);
-                        this.register_custom_precompiles(
-                            &mut evm,
-                            block_number,
-                            block_timestamp,
-                            current_randomness,
-                        );
+                        let evm = this.evm_config().evm_with_env(&mut db, evm_env);
                         let mut builder = this.evm_config().create_block_builder(evm, &parent, ctx);
 
                         if let Some(ref state_overrides) = state_overrides {
@@ -568,18 +539,6 @@ pub trait Call:
     /// Returns the maximum number of blocks accepted for `eth_simulateV1`.
     fn max_simulate_blocks(&self) -> u64;
 
-    /// Registers chain-specific precompiles for this EVM block.
-    fn register_custom_precompiles<EV>(
-        &self,
-        _evm: &mut EV,
-        _block_number: U256,
-        _block_timestamp: U256,
-        _current_randomness: Option<B256>,
-    ) where
-        EV: Evm<Precompiles = PrecompilesMap>,
-    {
-    }
-
     /// Returns whether `eth_simulateV1` should compute state roots.
     fn compute_state_root_for_eth_simulate(&self) -> bool;
 
@@ -623,16 +582,7 @@ pub trait Call:
     where
         DB: Database<Error = EvmDatabaseError<ProviderError>> + fmt::Debug,
     {
-        let block_number = evm_env.block_env.number();
-        let block_timestamp = evm_env.block_env.timestamp();
-        let current_randomness = evm_env.block_env.prevrandao();
         let mut evm = self.evm_config().evm_with_env(db, evm_env);
-        self.register_custom_precompiles(
-            &mut evm,
-            block_number,
-            block_timestamp,
-            current_randomness,
-        );
         let res = evm.transact(tx_env).map_err(Self::Error::from_evm_err)?;
 
         Ok(res)
@@ -651,16 +601,7 @@ pub trait Call:
         DB: Database<Error = EvmDatabaseError<ProviderError>> + fmt::Debug,
         I: InspectorFor<Self::Evm, DB>,
     {
-        let block_number = evm_env.block_env.number();
-        let block_timestamp = evm_env.block_env.timestamp();
-        let current_randomness = evm_env.block_env.prevrandao();
         let mut evm = self.evm_config().evm_with_env_and_inspector(db, evm_env, inspector);
-        self.register_custom_precompiles(
-            &mut evm,
-            block_number,
-            block_timestamp,
-            current_randomness,
-        );
         let res = evm.transact(tx_env).map_err(Self::Error::from_evm_err)?;
 
         Ok(res)
@@ -829,13 +770,12 @@ pub trait Call:
         }
     }
 
-    /// Applies the state changes that canonical execution made before the block's first body
-    /// transaction, on top of the parent state in `db`.
+    /// Applies the block-level changes the chain made before the block's first transaction, on
+    /// top of the parent state in `db`.
     ///
-    /// These are normally the EIP-2935 / EIP-4788 system calls. A pre-Alpha DKG epoch-change
-    /// block (see [`is_pre_alpha_dkg_epoch_block`]) instead gets the `onBlockStart` metadata
-    /// transaction its body omits; the pipe skipped the system calls for such blocks. The replayed
-    /// `onBlockStart` has no receipt and takes no transaction index.
+    /// `block` is a committed block read from the chain, so this uses
+    /// [`ConfigureEvm::chain_block_mode`]: the executor reproduces the chain's block-level steps,
+    /// such as the EIP-2935 / EIP-4788 system calls and one-shot hardfork changes.
     ///
     /// Note: This should only be called when replaying a block from its start. When tracing
     /// transactions on top of an already committed block state, those transitions are already
@@ -845,61 +785,13 @@ pub trait Call:
         block: &RecoveredBlock<ProviderBlock<Self::Provider>>,
         db: &mut StateCacheDb,
     ) -> Result<(), Self::Error> {
-        if !is_pre_alpha_dkg_epoch_block(self.provider().chain_spec().as_ref(), block) {
-            self.evm_config()
-                .executor_for_block(db, block.sealed_block())
-                .map_err(RethError::other)
-                .map_err(Self::Error::from_eth_err)?
-                .apply_pre_execution_changes()
-                .map_err(Self::Error::from_eth_err)?;
-            return Ok(())
-        }
-
-        let evm_env = self.evm_env_for_header(block.sealed_block().sealed_header())?;
-
-        // Step 1: rebuild the `onBlockStart` arguments from chain state.
-        let beneficiary = block.header().beneficiary();
-        let proposer_index = if beneficiary.is_zero() {
-            // gravity-sdk leaves the beneficiary zero for a NIL block.
-            NIL_PROPOSER_INDEX
-        } else {
-            // The active set only changes in `finishTransition`, so the parent state in `db`
-            // still maps the proposer index to the beneficiary. The view call is not committed.
-            let active_validators = self
-                .evm_config()
-                .evm_with_env(&mut *db, evm_env.clone())
-                .transact_system_call(
-                    SYSTEM_CALLER,
-                    VALIDATOR_MANAGER_ADDR,
-                    getActiveValidatorsCall {}.abi_encode().into(),
-                )
-                .map_err(Self::Error::from_evm_err)?
-                .result;
-            active_validator_index(beneficiary, &active_validators)
-                .map_err(Self::Error::from_eth_err)?
-        };
-        let post_block_state = self.state_at_hash(block.hash())?;
-        let timestamp_micros =
-            written_timestamp_micros(&post_block_state).map_err(Self::Error::from_eth_err)?;
-
-        // Step 2: execute it the way the pipe did, taking the nonce right before the body's
-        // `finishTransition`, and commit it.
-        let nonce = db
-            .basic(SYSTEM_CALLER)
+        self.evm_config()
+            .chain_block_mode()
+            .executor_for_block(db, block.sealed_block())
+            .map_err(RethError::other)
             .map_err(Self::Error::from_eth_err)?
-            .map(|account| account.nonce)
-            .unwrap_or_default();
-        let tx: ProviderTx<Self::Provider> = on_block_start_txn(
-            nonce,
-            evm_env.block_env.basefee(),
-            proposer_index,
-            timestamp_micros,
-        )
-        .map_err(Self::Error::from_eth_err)?;
-        let tx_env = self.evm_config().tx_env(Recovered::new_unchecked(&tx, SYSTEM_CALLER));
-        let res = self.transact(&mut *db, evm_env, tx_env)?;
-        db.commit(res.state);
-        Ok(())
+            .apply_pre_execution_changes()
+            .map_err(Self::Error::from_eth_err)
     }
 
     /// Replays all the transactions until the target transaction is found.
@@ -920,77 +812,12 @@ pub trait Call:
         DB: Database<Error = EvmDatabaseError<ProviderError>> + DatabaseCommit + core::fmt::Debug,
         I: IntoIterator<Item = Recovered<&'a ProviderTx<Self::Provider>>>,
     {
-        let block_number = evm_env.block_env.number();
-        let block_timestamp = evm_env.block_env.timestamp();
-        let current_randomness = evm_env.block_env.prevrandao();
-
-        // Gravity Alpha (system-tx gas-exempt) single-tx-family wiring. When the
-        // sender of a pre-target replay tx is `SYSTEM_CALLER` and Alpha is
-        // active for the replayed block, we need cfg disables on the EVM that
-        // commits that tx. The fork gate keys off the replayed block's
-        // timestamp (matches the block-family path in `trace.rs`).
-        let exempt_fork_active = is_system_tx_gas_exempt(
-            self.provider().chain_spec().as_ref(),
-            block_timestamp.saturating_to::<u64>(),
-        );
-
-        // Peek the first replay tx so we can seed the initial EVM with the cfg
-        // kind it actually wants. In the common case the prelude leads with
-        // SYSTEM_CALLER metadata + validator txs, so starting with disables OFF
-        // would force an immediate `finish()` + rebuild on entry; pre-toggling
-        // the initial cfg avoids that wasted rebuild + `register_custom_precompiles`
-        // call. Matches the block-family path in `trace.rs` (`first_kind_system_exempt`).
-        let mut transactions = transactions.into_iter().peekable();
-        let first_kind_system_exempt = exempt_fork_active &&
-            transactions.peek().map(|tx| is_gravity_system_caller(tx.signer())).unwrap_or(false);
-
-        let mut current_kind_system_exempt = first_kind_system_exempt;
-        let mut initial_env = evm_env;
-        initial_env.cfg_env.disable_base_fee = first_kind_system_exempt;
-        initial_env.cfg_env.disable_balance_check = first_kind_system_exempt;
-        let mut evm = self.evm_config().evm_with_env(db, initial_env);
-        self.register_custom_precompiles(
-            &mut evm,
-            block_number,
-            block_timestamp,
-            current_randomness,
-        );
-
-        // Protocol invariant pin: same rationale as `trace.rs`'s block-family loop —
-        // pipe pins SYSTEM_CALLER-signed txs to a contiguous block-head prefix, the
-        // cfg-rebuild optimization below relies on monotonic system→user transition.
-        // Matching unit-tested predicate: `reth_chainspec::system_txs_form_head_prefix`.
-        let mut saw_non_system_caller_tx = false;
-
+        let mut evm = self.evm_config().evm_with_env(db, evm_env);
         let mut index = 0;
         for tx in transactions {
             if *tx.tx_hash() == target_tx_hash {
                 // reached the target transaction
                 break
-            }
-
-            let is_system_caller = is_gravity_system_caller(tx.signer());
-            debug_assert!(
-                !(is_system_caller && saw_non_system_caller_tx),
-                "RPC trace replay invariant violated: SYSTEM_CALLER-signed tx at index {index} appears after a non-system-caller tx in block #{block_number}",
-            );
-            if !is_system_caller {
-                saw_non_system_caller_tx = true;
-            }
-
-            let tx_is_system_exempt = exempt_fork_active && is_system_caller;
-            if tx_is_system_exempt != current_kind_system_exempt {
-                let (db_taken, mut env_taken) = evm.finish();
-                env_taken.cfg_env.disable_base_fee = tx_is_system_exempt;
-                env_taken.cfg_env.disable_balance_check = tx_is_system_exempt;
-                evm = self.evm_config().evm_with_env(db_taken, env_taken);
-                self.register_custom_precompiles(
-                    &mut evm,
-                    block_number,
-                    block_timestamp,
-                    current_randomness,
-                );
-                current_kind_system_exempt = tx_is_system_exempt;
             }
 
             let tx_env = self.evm_config().tx_env(tx);

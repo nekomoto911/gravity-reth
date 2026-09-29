@@ -25,10 +25,11 @@ use alloy_consensus::{TxEip1559, TxEip2930, TxEip4844, TxEip7702, TxLegacy};
 use alloy_primitives::{hex, uint, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolCall, SolEvent};
-use gravity_precompiles::bls_pop_verify::BLS_PRECOMPILE_ADDR;
-use reth_pipe_exec_layer_ext_v2::{
-    mint_precompile::AUTHORIZED_CALLER as G_BRIDGE_RECEIVER,
-    onchain_config::{epoch::Reconfiguration, EPOCH_MANAGER_ADDR, NATIVE_MINT_PRECOMPILE_ADDR},
+use gravity_precompiles::{
+    bls_pop_verify::BLS_PRECOMPILE_ADDR, mint::AUTHORIZED_CALLER as G_BRIDGE_RECEIVER,
+};
+use reth_pipe_exec_layer_ext_v2::onchain_config::{
+    epoch::Reconfiguration, EPOCH_MANAGER_ADDR, NATIVE_MINT_PRECOMPILE_ADDR,
 };
 use revm_primitives::eip3860::MAX_INITCODE_SIZE;
 

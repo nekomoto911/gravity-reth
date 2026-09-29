@@ -12,28 +12,21 @@
 # shell script keeps the assertion text usable as both a hard check AND a
 # paste-able reproduction recipe.
 #
-# Invariants (8 total):
+# Invariants (numbered as introduced; 3, 5, 6 and 8 were retired once the
+# Gravity execution rules moved into `GravityEvmConfig` — the RPC replay
+# paths no longer carry rules to pin, and `gravity_pipe` checks every replay
+# against the committed chain, including a full re-run once the node's tip
+# has passed every fork):
 #   1. `fn transact_system_txn` lives in exactly two source files
 #      (serial impl + grevm impl).
 #   2. SYSTEM_CALLER address literal `625f0000` has a single source of
 #      truth (chainspec/src/gravity.rs + helper + tests only).
-#   3. trace.rs RPC replay uses historical state (`state_at_block_id` or
-#      `parent_hash()`), never node tip — the gas-exempt gate's correctness
-#      depends on it.
 #   4. `execute_history_block` / `push_history_block` has no non-test
 #      callers (R6 / design §3.6 keeps this debug-only).
-#   5. Pipe-layer custom precompile registration mirrors RPC re-registration
-#      so RPC trace replay doesn't silently lose BLS/randomness.
-#   6. `is_system_tx_gas_exempt` predicate is referenced by all three
-#      layers: evm, pipe, rpc (single-source-of-truth invariant).
 #   7. (HP-2) `disable_base_fee` / `disable_balance_check` writes are
 #      either fork-gated (file co-references `is_system_tx_gas_exempt` /
 #      `GravityHardfork::Alpha`) or live in approved
 #      simulation-endpoint files / test files.
-#   8. (HP-2) RPC replay paths (`replay_transactions_until`,
-#      `trace_block_until_with_inspector`) per-tx sender-check by
-#      referencing `is_system_tx_gas_exempt` (or
-#      `is_gravity_system_caller`) in the same file.
 #   9. CI allowlist parity: every Gravity pipe integration test binary
 #      under `crates/pipe-exec-layer-ext-v2/execute/tests/` — a
 #      `gravity_*.rs` file or a `gravity_*/main.rs` directory — must EITHER
@@ -81,13 +74,18 @@ ok() {
 # Invariant 1 — `fn transact_system_txn` lives in exactly two files.
 # ---------------------------------------------------------------------------
 echo "Invariant 1: fn transact_system_txn must live in exactly 2 source files (serial + grevm)"
-files_count=$(rg --type rust -l 'fn transact_system_txn' crates/ethereum/evm/src | sort -u | wc -l)
+# `gravity/mod.rs` only forwards `GravityEvmConfig::transact_system_txn` to the serial impl.
+impl_files() {
+    rg --type rust -l 'fn transact_system_txn' crates/ethereum/evm/src | sort -u | \
+        grep -vE 'crates/ethereum/evm/src/gravity/mod\.rs$'
+}
+files_count=$(impl_files | wc -l)
 if [ "$files_count" -ne 2 ]; then
     fail 1 "expected exactly 2 files defining fn transact_system_txn under crates/ethereum/evm/src, got $files_count" \
            "rg --type rust -l 'fn transact_system_txn' crates/ethereum/evm/src"
 fi
-has_lib=$(rg --type rust -l 'fn transact_system_txn' crates/ethereum/evm/src | grep -c 'lib\.rs$' || true)
-has_parallel=$(rg --type rust -l 'fn transact_system_txn' crates/ethereum/evm/src | grep -c 'parallel_execute\.rs$' || true)
+has_lib=$(impl_files | grep -c 'lib\.rs$' || true)
+has_parallel=$(impl_files | grep -c 'parallel_execute\.rs$' || true)
 if [ "$has_lib" -lt 1 ] || [ "$has_parallel" -lt 1 ]; then
     fail 1 "expected serial impl in lib.rs and grevm impl in parallel_execute.rs" \
            "rg --type rust -l 'fn transact_system_txn' crates/ethereum/evm/src"
@@ -116,20 +114,6 @@ fi
 ok 2 "SYSTEM_CALLER literal lives in the canonical const + helpers + tests only"
 
 # ---------------------------------------------------------------------------
-# Invariant 3 — RPC trace replay uses historical state.
-# Hard gate: trace.rs must reference `state_at_block_id` or `parent_hash()`.
-# If both vanish, the gas-exempt gate's "replay against parent state"
-# argument (design §3.5.2) collapses.
-# ---------------------------------------------------------------------------
-echo "Invariant 3: trace.rs RPC replay uses historical state"
-trace_rs="crates/rpc/rpc-eth-api/src/helpers/trace.rs"
-if ! rg -q 'state_at_block_id|parent_hash\(\)' "$trace_rs"; then
-    fail 3 "trace.rs must call state_at_block_id or parent_hash() — historical state lookup is load-bearing" \
-        "rg -n 'state_at_block_id|parent_hash\\(\\)' $trace_rs"
-fi
-ok 3 "trace.rs references state_at_block_id / parent_hash()"
-
-# ---------------------------------------------------------------------------
 # Invariant 4 — execute_history_block has no non-test callers.
 # Approved hits live in:
 #   - pipe-exec-layer-ext-v2/execute/src/lib.rs (def + dispatch)
@@ -148,38 +132,6 @@ fi
 ok 4 "history_block dispatch confined to pipe-exec-layer src/lib.rs and tests"
 
 # ---------------------------------------------------------------------------
-# Invariant 5 — pipe + RPC precompile registration in sync.
-# Pipe-side: at least one hit in pipe-exec-layer-ext-v2/execute/src/lib.rs
-# RPC-side : at least one hit anywhere under crates/rpc/.
-# ---------------------------------------------------------------------------
-echo "Invariant 5: pipe + RPC precompile registration in sync"
-if ! rg --type rust -q 'custom_precompiles_for_ordered_block|register_custom_precompiles' \
-        crates/pipe-exec-layer-ext-v2/execute/src/lib.rs; then
-    fail 5 "pipe-exec-layer-ext-v2/execute/src/lib.rs must register custom precompiles for ordered blocks" \
-        "rg --type rust -n 'custom_precompiles_for_ordered_block|register_custom_precompiles' crates/pipe-exec-layer-ext-v2/execute/src/lib.rs"
-fi
-if ! rg --type rust -q 'custom_precompiles_for_ordered_block|register_custom_precompiles' crates/rpc/; then
-    fail 5 "crates/rpc/ must have at least one register_custom_precompiles callsite — RPC trace replay would otherwise lose custom precompiles" \
-        "rg --type rust -n 'register_custom_precompiles' crates/rpc/"
-fi
-ok 5 "pipe-layer + RPC precompile registration both present"
-
-# ---------------------------------------------------------------------------
-# Invariant 6 — is_system_tx_gas_exempt referenced by all 3 layers.
-# evm  : crates/ethereum/evm/
-# pipe : crates/pipe-exec-layer-ext-v2/
-# rpc  : crates/rpc/
-# ---------------------------------------------------------------------------
-echo "Invariant 6: is_system_tx_gas_exempt referenced by evm + pipe + rpc"
-for layer_dir in crates/ethereum/evm crates/pipe-exec-layer-ext-v2 crates/rpc; do
-    if ! rg --type rust -q 'is_system_tx_gas_exempt' "$layer_dir"; then
-        fail 6 "is_system_tx_gas_exempt missing from $layer_dir — single-source-of-truth predicate must be wired everywhere" \
-            "rg --type rust -n 'is_system_tx_gas_exempt' $layer_dir"
-    fi
-done
-ok 6 "is_system_tx_gas_exempt wired in evm + pipe + rpc"
-
-# ---------------------------------------------------------------------------
 # Invariant 7 (HP-2 #1) — disable_base_fee / disable_balance_check writes
 # must either be fork-gated (file co-references is_system_tx_gas_exempt /
 # is_gravity_system_caller / GravityHardfork::Alpha / SYSTEM_CALLER) OR be
@@ -192,7 +144,9 @@ ok 6 "is_system_tx_gas_exempt wired in evm + pipe + rpc"
 #     each addition.
 # ---------------------------------------------------------------------------
 echo "Invariant 7 (HP-2 #1): disable_base_fee / disable_balance_check writes are fork-gated"
-approved_sim_endpoints='crates/rpc/rpc-eth-api/src/helpers/estimate\.rs$'
+# `call.rs`: `eth_call`, `eth_createAccessList` and `eth_simulateV1` (reth's own settings for
+# requests; the SYSTEM_CALLER gas exemption is applied by `GravityEvm` per transaction).
+approved_sim_endpoints='crates/rpc/rpc-eth-api/src/helpers/(estimate|call)\.rs$'
 hits=$(rg --type rust -l 'disable_base_fee|disable_balance_check' \
     crates/rpc crates/ethereum/evm crates/pipe-exec-layer-ext-v2 | sort -u)
 unapproved=""
@@ -216,34 +170,6 @@ fi
 ok 7 "disable_* writes are either fork-gated or in approved simulation/test files"
 
 # ---------------------------------------------------------------------------
-# Invariant 8 (HP-2 #2) — RPC replay paths reference the SYSTEM_CALLER
-# exemption check. Every file that calls `replay_transactions_until` or
-# `trace_block_until_with_inspector` (the two per-tx-cfg-toggling APIs)
-# must also reference `is_system_tx_gas_exempt` or `is_gravity_system_caller`
-# so the per-tx sender check stays paired with the per-tx replay.
-# ---------------------------------------------------------------------------
-echo "Invariant 8 (HP-2 #2): RPC replay paths have SYSTEM_CALLER exemption check"
-hits=$(rg --type rust -l 'replay_transactions_until|trace_block_until_with_inspector' crates/rpc | sort -u)
-unapproved=""
-for f in $hits; do
-    # skip the trait/helper definition itself if the gate is implemented by
-    # callers, not the trait file — but every consumer file MUST have the
-    # gate. (As of 2026-06-27 every hit file has both, so no exception
-    # exists; an exception would have to be added explicitly here with a
-    # comment.)
-    if ! rg --type rust -q 'is_system_tx_gas_exempt|is_gravity_system_caller' "$f"; then
-        unapproved="${unapproved}${f}
-"
-    fi
-done
-if [ -n "$unapproved" ]; then
-    fail 8 "RPC replay-path file calls replay_transactions_until / trace_block_until_with_inspector but lacks any reference to is_system_tx_gas_exempt or is_gravity_system_caller. Unapproved files:
-${unapproved}A new replay caller must per-tx check sender against SYSTEM_CALLER." \
-        "rg --type rust -n 'replay_transactions_until|trace_block_until_with_inspector' crates/rpc"
-fi
-ok 8 "RPC replay paths reference SYSTEM_CALLER exemption check"
-
-# ---------------------------------------------------------------------------
 # Invariant 9 — CI allowlist parity for Gravity pipe integration tests.
 # Every test binary under `crates/pipe-exec-layer-ext-v2/execute/tests/` named
 # `gravity_*` — a single-file binary `gravity_<name>.rs` or a directory binary
@@ -265,11 +191,7 @@ echo "Invariant 9: CI --test allowlist covers all gravity_* pipe integration tes
 # should also have a follow-up issue / PR tracked. Removing an entry
 # means the corresponding `--test <name>` line must be added to the
 # workflow.
-declare -A KNOWN_UNWIRED_TESTS=(
-    # Fails until the RPC replay fixes for #441 land; the mismatches it
-    # reports are inventoried in #449. Wire it together with that fix.
-    [gravity_pipe]="fails until the #441 replay fixes land (mismatches inventoried in #449)"
-)
+declare -A KNOWN_UNWIRED_TESTS=()
 
 workflow="$REPO_ROOT/.github/workflows/integration.yml"
 tests_dir="crates/pipe-exec-layer-ext-v2/execute/tests"

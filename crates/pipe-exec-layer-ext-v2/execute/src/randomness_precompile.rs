@@ -243,4 +243,109 @@ mod tests {
         assert_eq!(older.value, Some(B256::repeat_byte(0x21)));
         assert_eq!(older.gas_used, 99);
     }
+
+    /// The pipe's [`ExecutionRandomnessProvider`] and replay's `HeaderRandomnessProvider` must
+    /// produce byte-identical lookups on the same `(block_number, query_height)` matrix when given
+    /// consistent data sources; otherwise a block calling the randomness-by-height precompile
+    /// replays differently from how it was committed.
+    ///
+    /// - **pipe** reads the in-flight ordered block's `prev_randao` for the current block, the
+    ///   parent header's `mix_hash` for the parent, and `GravityStorage` for older heights.
+    /// - **replay** reads the EVM block environment's `prev_randao` for the current block and
+    ///   canonical headers' `mix_hash` for every other height.
+    ///
+    /// Both are fed the same data here; the sweep covers every branch of both implementations.
+    #[test]
+    fn execution_provider_and_header_provider_agree_byte_for_byte() {
+        use alloy_primitives::{Address, U256};
+        use reth_ethereum_primitives::Receipt;
+        use reth_evm_ethereum::gravity::{GravityChainReader, HeaderRandomnessProvider};
+        use reth_provider::ProviderResult;
+        use std::sync::Arc;
+
+        #[derive(Debug)]
+        struct Headers(BTreeMap<u64, B256>);
+
+        impl GravityChainReader for Headers {
+            fn mix_hash_by_number(&self, number: u64) -> ProviderResult<Option<B256>> {
+                Ok(self.0.get(&number).copied())
+            }
+            fn canonical_hash(&self, _: u64) -> ProviderResult<Option<B256>> {
+                unreachable!()
+            }
+            fn header_timestamp(&self, _: B256) -> ProviderResult<Option<u64>> {
+                unreachable!()
+            }
+            fn receipts_by_block_hash(&self, _: B256) -> ProviderResult<Option<Vec<Receipt>>> {
+                unreachable!()
+            }
+            fn storage_after_block(
+                &self,
+                _: B256,
+                _: Address,
+                _: B256,
+            ) -> ProviderResult<Option<U256>> {
+                unreachable!()
+            }
+        }
+
+        const CURRENT_NUMBER: u64 = 1_000;
+        let recent_window: u64 = 100;
+        let policy =
+            RandomnessByHeightGasPolicy { recent_window, recent_gas: 4_000, lookup_gas: 20_000 };
+
+        // Missing heights (e.g. CURRENT_NUMBER / 2) exercise the agreed-miss path.
+        let headers: BTreeMap<u64, B256> = [
+            0u64,
+            1,
+            CURRENT_NUMBER - recent_window - 1,
+            CURRENT_NUMBER - recent_window,
+            CURRENT_NUMBER - recent_window + 1,
+            CURRENT_NUMBER - 2,
+            CURRENT_NUMBER - 1,
+            CURRENT_NUMBER,
+        ]
+        .into_iter()
+        .map(|h| (h, B256::with_last_byte((h % 251) as u8 + 1)))
+        .collect();
+        let current_randomness = headers[&CURRENT_NUMBER];
+
+        let header_provider = HeaderRandomnessProvider::new(
+            Arc::new(Headers(headers.clone())),
+            CURRENT_NUMBER,
+            Some(current_randomness),
+            policy,
+        );
+        // The executing block is not in `GravityStorage` yet.
+        let mut stored = headers.clone();
+        stored.remove(&CURRENT_NUMBER);
+        let execution_provider = ExecutionRandomnessProvider::new_with_gas_policy(
+            MockFallback { values: stored },
+            CURRENT_NUMBER,
+            current_randomness,
+            CURRENT_NUMBER - 1,
+            headers.get(&(CURRENT_NUMBER - 1)).copied(),
+            policy,
+        );
+
+        for height in [
+            0u64,
+            1,
+            CURRENT_NUMBER / 2,
+            CURRENT_NUMBER - recent_window - 1,
+            CURRENT_NUMBER - recent_window,
+            CURRENT_NUMBER - recent_window + 1,
+            CURRENT_NUMBER - 2,
+            CURRENT_NUMBER - 1,
+            CURRENT_NUMBER,
+            CURRENT_NUMBER + 1,
+            u64::MAX,
+        ] {
+            assert_eq!(
+                execution_provider.randomness_by_height(height).unwrap(),
+                header_provider.randomness_by_height(height).unwrap(),
+                "pipe and replay randomness lookups differ at height {height}"
+            );
+        }
+    }
 }

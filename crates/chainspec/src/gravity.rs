@@ -94,8 +94,8 @@ pub fn is_gravity_system_caller(addr: Address) -> bool {
 ///
 /// Single source of truth for the L1 (cfg-side) and L2 (construction-side)
 /// gas-exempt gating; all callsites — serial executor, grevm executor, pipe
-/// system-tx construction, RPC trace replay, RPC precompile registration —
-/// MUST route their fork check through this helper to keep the predicate
+/// system-tx construction, and replay's `GravityEvm` (gas exemption and
+/// precompile set) — MUST route their fork check through this helper to keep the predicate
 /// uniform. Centralizing the predicate here (in `reth-chainspec`, the crate
 /// `reth-rpc-eth-api` / `reth-evm-ethereum` / `reth-pipe-exec-layer-ext-v2`
 /// all already depend on) lets every replay path reuse it without pulling in
@@ -145,16 +145,12 @@ pub fn is_block_gas_last_gate_active<S: EthChainSpec>(chain_spec: &S, block_ts: 
 /// The pipe layer pins protocol-injected system txs (metadata `onBlockStart`
 /// plus DKG/JWK validator txns) to the front of the block at construction time
 /// (`pipe-exec-layer-ext-v2/execute/src/onchain_config/metadata_txn.rs:120` /
-/// `:185`). Both RPC replay paths — block-family
-/// `trace_block_until_with_inspector` and single-tx
-/// `replay_transactions_until` — build their EVM-cfg rebuild optimization
-/// ("at most one rebuild per block, on the system→user boundary") on top of
-/// this invariant. A violation would silently degrade the rebuild count in
-/// release and almost certainly indicate either a pipe-layer regression or
-/// (in theory) a [`SYSTEM_CALLER`] signature forgery. Each replay loop runs
-/// the matching inline check inside `debug_assert!` so debug builds catch a
-/// regression loudly; this function documents the predicate and is the
-/// unit-tested algorithm of record.
+/// `:185`). Replay builds on it: `reth-evm-ethereum`'s `GravityEvm` switches an
+/// EVM from its system phase to its user phase at most once, and fails a
+/// [`SYSTEM_CALLER`] transaction that follows a user transaction. A violation
+/// would almost certainly indicate either a pipe-layer regression or (in
+/// theory) a [`SYSTEM_CALLER`] signature forgery. This function documents the
+/// predicate and is the unit-tested algorithm of record.
 ///
 /// Returns `Ok(())` when the invariant holds, or `Err(idx)` for the index of
 /// the first [`SYSTEM_CALLER`]-signed transaction that appears AFTER a

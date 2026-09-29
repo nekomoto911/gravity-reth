@@ -10,10 +10,10 @@
 //! `GrevmExecutor`; the migration is therefore invoked from Grevm's shared
 //! post-execution hook, matching the historical Gravity hardfork semantics.
 
+use super::common::HardforkState;
 use alloc::{format, vec::Vec};
 use alloy_primitives::{address, b256, Address, Bytes, B256};
-use reth_ethereum_primitives::EthPrimitives;
-use reth_evm::{execute::BlockExecutionError, parallel_execute::ParallelExecutor};
+use reth_evm::execute::BlockExecutionError;
 use revm::{
     bytecode::Bytecode,
     state::{Account, AccountInfo, AccountStatus, EvmState},
@@ -78,7 +78,7 @@ pub(crate) fn apply_state_changes<Executor>(
     block_timestamp: u64,
 ) -> Result<(), BlockExecutionError>
 where
-    Executor: ParallelExecutor<Primitives = EthPrimitives, Error = BlockExecutionError> + ?Sized,
+    Executor: HardforkState + ?Sized,
 {
     let mut previous_accounts = Vec::with_capacity(UPGRADES.len());
     let mut pre_fork_count = 0;

@@ -482,6 +482,20 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         BasicBlockExecutor::new(self, db)
     }
 
+    /// Returns a copy of this configuration that executes blocks as committed chain blocks.
+    ///
+    /// Gravity: an endpoint that replays a block it read from the chain by number or hash uses
+    /// this copy, so the block executor reproduces the block-level steps the chain applied to
+    /// it, including one-shot hardfork changes. Every other block (simulated, caller-provided,
+    /// pending, engine payload) gets only Ethereum's block-level steps and uses the configuration
+    /// as is.
+    ///
+    /// Default: returns an unchanged copy, for configurations without such steps.
+    #[auto_impl(keep_default_for(&, Arc))]
+    fn chain_block_mode(&self) -> Self {
+        self.clone()
+    }
+
     /// Executes a single system transaction directly against the given database state and commits
     /// the resulting state changes immediately.
     ///
