@@ -647,10 +647,8 @@ where
                 })
             })
             .unwrap_or_default();
-        let storage_root = db
-            .database
-            .storage_root_v2(address, hashed_storage)
-            .map_err(Eth::Error::from_eth_err)?;
+        let storage_root =
+            db.database.storage_root(address, hashed_storage).map_err(Eth::Error::from_eth_err)?;
 
         Ok(Some(Account { balance, nonce, code_hash, storage_root }))
     }
@@ -738,10 +736,8 @@ where
                     db.merge_transitions(BundleRetention::PlainState);
                     // Compute state root from the accumulated state changes
                     let hashed_state = db.database.hashed_post_state(&db.bundle_state);
-                    let root = db
-                        .database
-                        .state_root_v2(hashed_state)
-                        .map_err(Eth::Error::from_eth_err)?;
+                    let root =
+                        db.database.state_root(hashed_state).map_err(Eth::Error::from_eth_err)?;
                     roots.push(root);
                 }
 
