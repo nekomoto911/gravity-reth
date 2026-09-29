@@ -7,6 +7,11 @@
 //! - `eth_callMany`, `debug_traceCallMany` with `transactionIndex = n`: the first `n` transactions
 //!   are replayed; with `n` equal to the transaction count nothing is replayed and the call runs on
 //!   the committed post-block state instead.
+//!
+//! The call endpoints return only the call placed on top, not the replayed transactions, so two
+//! kinds of calls probe the replayed prefix: `Timestamp.nowMicroseconds()` shows that
+//! `onBlockStart` ran, and every user transaction re-run as a call at its own position must
+//! reproduce its receipt, on top of a replay of every transaction before it.
 
 use super::{
     call_tracer_options,
@@ -14,16 +19,16 @@ use super::{
     result_or_record,
 };
 use crate::{report::BlockReport, rpc::RpcClient};
-use alloy_consensus::TrieAccount;
+use alloy_consensus::{transaction::SignerRecoverable, TrieAccount};
 use alloy_eips::BlockId;
-use alloy_primitives::{Bytes, TxKind, U64};
+use alloy_primitives::{Bytes, Log, TxKind, U256, U64};
 use alloy_rpc_types_eth::{
     AccountInfo, Bundle, EthCallResponse, Index, StateContext, TransactionIndex, TransactionInput,
     TransactionRequest,
 };
-use alloy_rpc_types_trace::geth::CallFrame;
+use alloy_rpc_types_trace::geth::{CallFrame, CallLogFrame};
 use alloy_sol_types::{sol, SolCall};
-use reth_pipe_exec_layer_ext_v2::onchain_config::TIMESTAMP_ADDR;
+use reth_pipe_exec_layer_ext_v2::onchain_config::{SYSTEM_CALLER, TIMESTAMP_ADDR};
 use serde_json::json;
 
 sol! {
@@ -47,6 +52,17 @@ pub(super) fn check_mid_block(
     // position past `onBlockStart`.
     if last_index > 0 {
         check_time_before_last_transaction(report, rpc, committed, last_index);
+    }
+
+    // Step 3: every user transaction, re-run as a call on top of the transactions before it,
+    // reproduces its receipt. System transactions are not signed (their signature is zero) and
+    // are not a sender's call, so they have no call to re-run.
+    for (index, tx) in committed.block.body.transactions.iter().enumerate() {
+        let Ok(sender) = tx.recover_signer() else { continue };
+        if sender != SYSTEM_CALLER {
+            let call = TransactionRequest::from_transaction_with_sender(tx.clone(), sender);
+            check_transaction_as_call(report, rpc, committed, index, call);
+        }
     }
 }
 
@@ -179,4 +195,97 @@ fn check_time_before_last_transaction(
     if let Some(frame) = result_or_record(report, endpoint, tx_index, response) {
         check_time(report, endpoint, frame.output.as_ref());
     }
+}
+
+/// Runs `call`, transaction `index` as a request, on top of the block's first `index`
+/// transactions: the state the chain executed the transaction on. The call must then use the
+/// transaction's gas, succeed or fail alike and emit the receipt's logs; a prefix replayed
+/// differently shows here as soon as the difference reaches the transaction.
+///
+/// `call` copies the transaction's gas limit, fees, access list and authorization list. An
+/// explicit gas limit matters: without one reth caps the call's gas by the sender's balance.
+/// These endpoints run the call with `eth_call` semantics: no fee is charged and the nonce is not
+/// checked, so a contract reading its sender's balance would see more than on chain. The test's
+/// scenario transactions do not depend on that.
+fn check_transaction_as_call(
+    report: &mut BlockReport<'_>,
+    rpc: &RpcClient,
+    committed: &Committed,
+    index: usize,
+    call: TransactionRequest,
+) {
+    let block = BlockId::hash(committed.hash);
+    let tx_index = Some(index);
+    let mut options = call_tracer_options();
+    options["tracerConfig"] = json!({ "withLog": true });
+
+    let endpoint = "debug_traceCall";
+    let mut at_index = options.clone();
+    at_index["txIndex"] = json!(U64::from(index));
+    let response = rpc.call::<CallFrame>(endpoint, json!([call, block, at_index]));
+    if let Some(frame) = result_or_record(report, endpoint, tx_index, response) {
+        check_frame_as_transaction(report, endpoint, committed, index, &frame);
+    }
+
+    let bundles = [Bundle { transactions: vec![call], block_override: None }];
+    let state_context = StateContext {
+        block_number: Some(block),
+        transaction_index: Some(TransactionIndex::Index(index)),
+    };
+
+    let endpoint = "debug_traceCallMany";
+    let params = json!([bundles, state_context, options]);
+    let response = rpc.call::<Vec<Vec<CallFrame>>>(endpoint, params);
+    if let Some(frames) = result_or_record(report, endpoint, tx_index, response) {
+        match frames.first().and_then(|bundle| bundle.first()) {
+            Some(frame) => check_frame_as_transaction(report, endpoint, committed, index, frame),
+            None => report.record(endpoint, tx_index, "re-run as call: trace", "a trace", "none"),
+        }
+    }
+
+    // `eth_callMany` returns only the output or the error, a revert and a halt alike.
+    let endpoint = "eth_callMany";
+    let response = rpc.call::<Vec<Vec<EthCallResponse>>>(endpoint, json!([bundles, state_context]));
+    if let Some(results) = result_or_record(report, endpoint, tx_index, response) {
+        let result = results.first().and_then(|bundle| bundle.first());
+        let success = result.map(|result| result.error.is_none());
+        let expected = Some(committed.receipts[index].success);
+        report.check_eq(endpoint, tx_index, "re-run as call: success", expected, success);
+    }
+}
+
+/// The root frame of transaction `index` re-run as a call carries the transaction's gas used and
+/// status. Its logs are compared only when both succeeded: the call tracer keeps a failed root
+/// frame's own logs, while a failed transaction's receipt has none.
+fn check_frame_as_transaction(
+    report: &mut BlockReport<'_>,
+    endpoint: &'static str,
+    committed: &Committed,
+    index: usize,
+    frame: &CallFrame,
+) {
+    let tx_index = Some(index);
+    let receipt = &committed.receipts[index];
+    let gas_used = U256::from(committed.gas_used(index));
+    report.check_eq(endpoint, tx_index, "re-run as call: gas used", gas_used, frame.gas_used);
+    let success = frame.error.is_none();
+    report.check_eq(endpoint, tx_index, "re-run as call: success", receipt.success, success);
+    if receipt.success && success {
+        let logs = call_frame_logs(frame);
+        report.check_eq(endpoint, tx_index, "re-run as call: logs", &receipt.logs, &logs);
+    }
+}
+
+/// The call's logs in emission order. The call tracer (revm-inspectors) attaches each log to the
+/// frame that emitted it and, like the receipt, drops the logs of a failed frame and of every
+/// frame under it; each log's `index` counts all logs emitted before it in the call.
+fn call_frame_logs(root: &CallFrame) -> Vec<Log> {
+    let mut logs: Vec<CallLogFrame> = Vec::new();
+    let mut frames = vec![root];
+    while let Some(frame) = frames.pop() {
+        logs.extend(frame.logs.iter().cloned());
+        frames.extend(&frame.calls);
+    }
+    logs.sort_by_key(|log| log.index);
+    logs.into_iter().map(CallLogFrame::into_log).collect()
 }

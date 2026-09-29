@@ -107,7 +107,7 @@ over HTTP JSON-RPC, as on a mainnet RPC node (the node runs with `--http --http.
 | Intermediate roots | `debug_intermediateRoots` | One root per transaction; the last is the committed state root, unless the chain writes state after the block's last transaction |
 | Single transaction | `debug_traceTransaction`, `trace_replayTransaction`, `trace_transaction`, `trace_get`, `trace_transactionOpcodeGas`, `ots_traceTransaction`, `ots_getInternalOperations`, `ots_getTransactionError` | Each transaction's receipt (gas, success, revert output), as far as the endpoint exposes it |
 | Contract creators | `ots_getContractCreator` | Every created contract names its creating transaction and creator |
-| Mid-block | `debug_accountAt`, `debug_accountInfoAt`, `debug_traceCall` (`txIndex`), `eth_callMany`, `debug_traceCallMany` | The committed state at that position inside the block |
+| Mid-block | `debug_accountAt`, `debug_accountInfoAt`, `debug_traceCall` (`txIndex`), `eth_callMany`, `debug_traceCallMany` | The committed state at that position inside the block; every user transaction re-run as a call at its own position matches its receipt (gas used, success and logs from the traces; success from `eth_callMany`) |
 | Block execution | `reth_getBlockExecutionOutcome` | Receipts and every state change, including writes outside transactions |
 
 Once the timeline is done, `replay::check_block` runs again for every committed block. The node's
