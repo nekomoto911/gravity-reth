@@ -45,7 +45,7 @@ const SCENARIO_BLOCKS: [PlanFn; 4] = [
 ];
 
 /// A public key and its proof of possession; the precompile returns true for them.
-pub(super) const VALID_BLS_POP_INPUT: [u8; 144] = hex!(
+const VALID_BLS_POP_INPUT: [u8; 144] = hex!(
     "8ae7e5822ba97ab07877ea318e747499da648b27302414f9d0b9bb7e3646d248"
     "be90c9fdaddfdb93485a6e9334f01093"
     "b16db5b947dda6c513b24b8724b659996826bfb69a8914f1b295e39572f40923"
@@ -130,19 +130,8 @@ impl Base {
     /// Alice calls the BLS precompile with enough gas, Bob with too little: Alice's call
     /// succeeds, Bob's runs out of gas and fails without stopping the pipe.
     fn bls_precompile(&mut self, chain: &Chain<'_>, parent: u64) -> (ScenarioBlock, Expected) {
-        let call = |account: TestAccount, gas_limit| {
-            account.sign(TxEip1559 {
-                gas_limit,
-                input: Bytes::from(VALID_BLS_POP_INPUT),
-                ..eip1559_tx(
-                    chain.chain_id,
-                    chain.nonce(account.address(), parent),
-                    TxKind::Call(BLS_PRECOMPILE_ADDR),
-                )
-            })
-        };
-        let enough_gas = call(TestAccount::Alice, BLS_ENOUGH_GAS);
-        let out_of_gas = call(TestAccount::Bob, BLS_TOO_LITTLE_GAS);
+        let enough_gas = bls_call(chain, parent, TestAccount::Alice, BLS_ENOUGH_GAS);
+        let out_of_gas = bls_call(chain, parent, TestAccount::Bob, BLS_TOO_LITTLE_GAS);
         let expected = Expected::BlsPrecompile {
             enough_gas: enough_gas.hash(),
             out_of_gas: out_of_gas.hash(),
@@ -304,6 +293,25 @@ pub(super) fn invalid_transactions_block(
         .chain([(last_valid, true)])
         .collect();
     Inclusion::plan(transactions)
+}
+
+/// `account` calls the BLS precompile with a valid proof of possession and `gas_limit`, as its
+/// next transaction after block `parent`.
+pub(super) fn bls_call(
+    chain: &Chain<'_>,
+    parent: u64,
+    account: TestAccount,
+    gas_limit: u64,
+) -> SignedTx {
+    account.sign(TxEip1559 {
+        gas_limit,
+        input: Bytes::from(VALID_BLS_POP_INPUT),
+        ..eip1559_tx(
+            chain.chain_id,
+            chain.nonce(account.address(), parent),
+            TxKind::Call(BLS_PRECOMPILE_ADDR),
+        )
+    })
 }
 
 /// Transactions submitted in one block, of which exactly the `included` ones must be in it, in

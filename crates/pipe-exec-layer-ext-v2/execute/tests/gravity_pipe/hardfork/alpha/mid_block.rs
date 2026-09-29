@@ -13,7 +13,7 @@
 
 use crate::{
     hardfork::{
-        base::{BLS_ENOUGH_GAS, VALID_BLS_POP_INPUT},
+        base::{bls_call, BLS_ENOUGH_GAS},
         Chain, ScenarioBlock,
     },
     node::{eip1559_tx, CommittedBlock, TestAccount},
@@ -25,7 +25,6 @@ use alloy_eips::BlockId;
 use alloy_primitives::{hex, Address, Bytes, TxKind, B256, U256, U64};
 use alloy_rpc_types_eth::{AccountInfo, EthCallResponse, StateContext, TransactionIndex};
 use alloy_rpc_types_trace::geth::CallFrame;
-use gravity_precompiles::bls_pop_verify::BLS_PRECOMPILE_ADDR;
 use serde_json::json;
 
 const SOURCE: &str = "scenario: Alpha mid-block replay";
@@ -51,15 +50,7 @@ pub(super) struct MidBlock {
 impl MidBlock {
     pub(super) fn plan(chain: &Chain<'_>, parent: u64) -> (ScenarioBlock, Self) {
         let chain_id = chain.chain_id;
-        let calls_bls = ACCOUNT_A.sign(TxEip1559 {
-            gas_limit: BLS_ENOUGH_GAS,
-            input: Bytes::from(VALID_BLS_POP_INPUT),
-            ..eip1559_tx(
-                chain_id,
-                chain.nonce(ACCOUNT_A.address(), parent),
-                TxKind::Call(BLS_PRECOMPILE_ADDR),
-            )
-        });
+        let calls_bls = bls_call(chain, parent, ACCOUNT_A, BLS_ENOUGH_GAS);
         let transfer = ACCOUNT_B.sign(TxEip1559 {
             value: U256::from(1),
             ..eip1559_tx(

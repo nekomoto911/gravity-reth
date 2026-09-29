@@ -15,7 +15,7 @@ mod mid_block;
 mod simulation;
 
 use super::{
-    base::{BLS_ENOUGH_GAS, VALID_BLS_POP_INPUT},
+    base::{bls_call, BLS_ENOUGH_GAS},
     Chain, ScenarioBlock,
 };
 use crate::{
@@ -26,7 +26,7 @@ use crate::{
 use alloy_consensus::TxEip1559;
 use alloy_primitives::{Bytes, TxKind, B256, U256};
 use alloy_rpc_types_eth::TransactionReceipt;
-use gravity_precompiles::bls_pop_verify::{BLS_PRECOMPILE_ADDR, POP_VERIFY_GAS};
+use gravity_precompiles::bls_pop_verify::POP_VERIFY_GAS;
 use mid_block::MidBlock;
 use reth_pipe_exec_layer_ext_v2::{
     onchain_config::SYSTEM_CALLER,
@@ -116,30 +116,18 @@ impl Alpha {
     /// Alice calls the BLS precompile and Bob the randomness-by-height precompile, for the
     /// parent's height. The chain installs both for user transactions from Alpha on.
     fn precompile_calls(chain: &Chain<'_>, parent: u64) -> (ScenarioBlock, Expected) {
-        let call = |account: TestAccount, to, gas_limit, input| {
-            account.sign(TxEip1559 {
-                gas_limit,
-                input,
-                ..eip1559_tx(
-                    chain.chain_id,
-                    chain.nonce(account.address(), parent),
-                    TxKind::Call(to),
-                )
-            })
-        };
-        let bls = call(
-            TestAccount::Alice,
-            BLS_PRECOMPILE_ADDR,
-            BLS_ENOUGH_GAS,
-            Bytes::from(VALID_BLS_POP_INPUT),
-        );
-        // The input is one ABI word: the block number.
-        let randomness = call(
-            TestAccount::Bob,
-            RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR,
-            RANDOMNESS_CALL_GAS,
-            Bytes::copy_from_slice(B256::from(U256::from(parent)).as_slice()),
-        );
+        let bls = bls_call(chain, parent, TestAccount::Alice, BLS_ENOUGH_GAS);
+        let account = TestAccount::Bob;
+        let randomness = account.sign(TxEip1559 {
+            gas_limit: RANDOMNESS_CALL_GAS,
+            // The input is one ABI word: the block number.
+            input: Bytes::copy_from_slice(B256::from(U256::from(parent)).as_slice()),
+            ..eip1559_tx(
+                chain.chain_id,
+                chain.nonce(account.address(), parent),
+                TxKind::Call(RANDOMNESS_BY_HEIGHT_PRECOMPILE_ADDR),
+            )
+        });
         let expected = Expected::PrecompileCalls { bls: bls.hash(), randomness: randomness.hash() };
         (ScenarioBlock { transactions: vec![bls, randomness], ..Default::default() }, expected)
     }
