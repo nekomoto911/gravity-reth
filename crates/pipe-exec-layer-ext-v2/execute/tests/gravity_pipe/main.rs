@@ -5,9 +5,10 @@
 //! One node starts from mainnet genesis and walks genesis → Prague → Alpha → Beta →
 //! Gamma in wall-clock time. Every block is executed by the pipe (grevm), committed,
 //! and persisted before the next one is built. Epoch changes happen throughout the
-//! timeline, never on a hardfork activation block. After every block, each RPC endpoint
-//! that replays it must reproduce the committed result; differences are collected and
-//! fail the test once the timeline is done.
+//! timeline, never on a hardfork activation block. After every block, and again for every
+//! block once the node's tip is past every fork, each RPC endpoint that replays it must
+//! reproduce the committed result; differences are collected and fail the test once the
+//! timeline is done.
 
 mod hardfork;
 mod node;
@@ -180,10 +181,21 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
         epoch_changes.len()
     );
 
-    // Step 4: replays spanning many blocks reproduce them too.
+    // Step 4: every block goes through the replay check again, now that the tip is past every
+    // fork. A replay must follow the replayed block's own timestamp and parent state (hardfork
+    // gating, precompile set, gas exemption, Gamma migration), not the node's latest block;
+    // right after commit the two coincide, so only this pass tells them apart.
+    tokio::task::block_in_place(|| {
+        for (block, phase) in &blocks {
+            let mut block_report = report.for_block_after_timeline(block.number, *phase);
+            replay::check_block(&provider, &rpc, block, *phase, &mut block_report);
+        }
+    });
+
+    // Step 5: replays spanning many blocks reproduce them too.
     tokio::task::block_in_place(|| replay::check_blocks(&provider, &rpc, &blocks, &mut report));
 
-    // Step 5: every replay reproduced the committed blocks.
+    // Step 6: every replay reproduced the committed blocks.
     report.assert_empty();
     Ok(())
 }

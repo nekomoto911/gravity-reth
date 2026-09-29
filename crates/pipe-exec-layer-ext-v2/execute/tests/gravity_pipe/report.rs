@@ -19,6 +19,16 @@ impl MismatchReport {
         BlockReport { report: self, scope: Scope::Block { number, phase } }
     }
 
+    /// Scopes recording to one committed block replayed again once the timeline is done, so a
+    /// mismatch that shows only once the tip has moved on is not mistaken for a duplicate.
+    pub(crate) const fn for_block_after_timeline(
+        &mut self,
+        number: u64,
+        phase: Phase,
+    ) -> BlockReport<'_> {
+        BlockReport { report: self, scope: Scope::BlockAfterTimeline { number, phase } }
+    }
+
     /// Scopes recording to a range of committed blocks, for endpoints that replay several
     /// blocks in one call.
     pub(crate) const fn for_blocks(&mut self, first: u64, last: u64) -> BlockReport<'_> {
@@ -62,6 +72,9 @@ impl Display for Mismatch {
         let Self { scope, source, tx_index, field, expected, actual } = self;
         match scope {
             Scope::Block { number, phase } => write!(f, "block {number} ({phase}) {source}")?,
+            Scope::BlockAfterTimeline { number, phase } => {
+                write!(f, "block {number} ({phase}, replayed after the timeline) {source}")?
+            }
             Scope::Blocks { first, last } => write!(f, "blocks {first}..={last} {source}")?,
         }
         if let Some(index) = tx_index {
@@ -71,10 +84,12 @@ impl Display for Mismatch {
     }
 }
 
-/// The committed blocks a mismatch is about.
+/// The committed blocks a mismatch is about. `BlockAfterTimeline` is one block replayed again
+/// once the timeline is done and the tip is past every fork.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Scope {
     Block { number: u64, phase: Phase },
+    BlockAfterTimeline { number: u64, phase: Phase },
     Blocks { first: u64, last: u64 },
 }
 

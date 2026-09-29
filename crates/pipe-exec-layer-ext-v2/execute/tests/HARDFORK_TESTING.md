@@ -110,8 +110,11 @@ over HTTP JSON-RPC, as on a mainnet RPC node (the node runs with `--http --http.
 | Mid-block | `debug_accountAt`, `debug_accountInfoAt`, `debug_traceCall` (`txIndex`), `eth_callMany`, `debug_traceCallMany` | The committed state at that position inside the block |
 | Block execution | `reth_getBlockExecutionOutcome` | Receipts and every state change, including writes outside transactions |
 
-Once the timeline is done, `replay::check_blocks` also replays spans of many blocks in one call
-(`trace_filter`, `reth_getBlockExecutionOutcome` over ranges).
+Once the timeline is done, `replay::check_block` runs again for every committed block. The node's
+tip is then past every hardfork, so this pass shows that a replay follows the replayed block's own
+timestamp and parent state (hardfork gating, precompile set, gas exemption, Gamma migration), not
+the node's latest block; right after commit the two coincide. `replay::check_blocks` then replays
+spans of many blocks in one call (`trace_filter`, `reth_getBlockExecutionOutcome` over ranges).
 
 The per-module docs in `replay/` explain exactly which fields each endpoint is compared on and
 why.
@@ -121,10 +124,13 @@ why.
 Every difference, including an endpoint error, is recorded in the shared `MismatchReport` and the
 timeline continues. Scenario assertions record into the same report. Before the end-of-run
 harness assertions the test prints the entries recorded so far, so a harness failure cannot hide
-them; at the end it panics with one line per entry:
+them; at the end it panics with one line per entry. Entries from the second per-block pass carry
+`replayed after the timeline`, so a mismatch that appears only once the tip has moved on is not
+read as a duplicate of one found right after commit:
 
 ```
 block <number> (<phase>) <endpoint or scenario> [tx <index>] <field>: expected <value>, actual <value>
+block <number> (<phase>, replayed after the timeline) <endpoint> [tx <index>] <field>: expected <value>, actual <value>
 blocks <first>..=<last> <endpoint> [tx <index>] <field>: expected <value>, actual <value>
 ```
 

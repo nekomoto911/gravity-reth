@@ -1,4 +1,5 @@
-//! Replay check run after every committed block.
+//! Replay check run after every committed block, and again for every block once the timeline
+//! is done.
 //!
 //! Every RPC endpoint that re-executes a persisted block must reproduce what the pipe
 //! committed. The committed result is read back from the node's storage (header,
