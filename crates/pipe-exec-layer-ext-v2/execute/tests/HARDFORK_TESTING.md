@@ -177,11 +177,11 @@ class of endpoint.
 
 ```bash
 cargo test -p reth-pipe-exec-layer-ext-v2 --test gravity_pipe -- --nocapture
-# or, as CI does:
+# or:
 cargo nextest run -p reth-pipe-exec-layer-ext-v2 --test gravity_pipe
 ```
 
 The test clears its data directory (`crates/pipe-exec-layer-ext-v2/execute/data/gravity_pipe`)
-before starting, so no manual cleanup is needed. CI runs it in the `gravity-pipe-test` job of
-`.github/workflows/integration.yml`; `.config/nextest.toml` gives it a 10-minute ceiling and no
-retries.
+before starting, so no manual cleanup is needed. `.config/nextest.toml` gives it a 10-minute
+ceiling and no retries. It is not run in CI yet: it fails until the RPC replay fixes for #441 land
+(the mismatches are inventoried in #449).

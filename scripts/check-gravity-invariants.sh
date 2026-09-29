@@ -265,7 +265,11 @@ echo "Invariant 9: CI --test allowlist covers all gravity_* pipe integration tes
 # should also have a follow-up issue / PR tracked. Removing an entry
 # means the corresponding `--test <name>` line must be added to the
 # workflow.
-declare -A KNOWN_UNWIRED_TESTS=()
+declare -A KNOWN_UNWIRED_TESTS=(
+    # Fails until the RPC replay fixes for #441 land; the mismatches it
+    # reports are inventoried in #449. Wire it together with that fix.
+    [gravity_pipe]="fails until the #441 replay fixes land (mismatches inventoried in #449)"
+)
 
 workflow="$REPO_ROOT/.github/workflows/integration.yml"
 tests_dir="crates/pipe-exec-layer-ext-v2/execute/tests"
