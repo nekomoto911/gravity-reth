@@ -2,9 +2,7 @@
 #[macro_use]
 mod channel;
 mod custom_precompiles;
-mod eip_2935;
 mod metrics;
-pub mod mint_precompile;
 pub mod onchain_config;
 pub mod randomness_precompile;
 mod system_caller_migration;
@@ -28,6 +26,7 @@ use alloy_primitives::{Address, Bytes, TxHash, B256, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use gravity_precompiles::{
     bls_pop_verify::{create_bls_pop_verify_precompile, BLS_PRECOMPILE_ADDR},
+    mint::create_mint_token_precompile,
     randomness_by_height::randomness_by_height_gas_policy_at_block,
 };
 use gravity_primitives::PIPE_BLOCK_GAS_LIMIT;
@@ -73,7 +72,6 @@ use tokio::sync::{
 use tracing::*;
 
 use crate::{
-    mint_precompile::create_mint_token_precompile,
     onchain_config::{
         construct_metadata_txn, construct_validator_txn_from_extra_data,
         dkg::{convert_dkg_start_event_to_api, DKGStartEvent},
@@ -858,7 +856,8 @@ impl<Storage: GravityStorage> Core<Storage> {
             header: Header {
                 // Transient carrier: feeds parent_id to the upstream EIP-2935 SystemCaller
                 // as the blockhash-contract calldata. Overwritten with the real chain
-                // parent hash by the seal step below before sealing.
+                // parent hash by the seal step below before sealing; the sealed header keeps
+                // parent_id as `parent_beacon_block_root` (see below).
                 parent_hash: ordered_block.parent_id,
                 beneficiary: ordered_block.coinbase,
                 timestamp: ordered_block.timestamp_us / 1_000_000, // convert to seconds
@@ -890,8 +889,11 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // only determine cancun fields when active
         if self.chain_spec.is_cancun_active_at_timestamp(block.timestamp) {
-            // FIXME: Is it OK to use the parent's block id as `parent_beacon_block_root` before
-            // execution?
+            // Gravity header contract: `parent_beacon_block_root` holds the parent's consensus
+            // block id. Gravity has no beacon chain; EIP-4788 writes this value into chain
+            // state, and it is the only record of the id EIP-2935 was fed above, which replay
+            // of a committed block reads back from here. Changing it forks state and breaks
+            // replay.
             block.header.parent_beacon_block_root = Some(ordered_block.parent_id);
 
             // TODO(nekomoto): fill `excess_blob_gas` and `blob_gas_used` fields
@@ -1247,15 +1249,16 @@ impl<Storage: GravityStorage> Core<Storage> {
 
         // EIP-2935 (Prague) boundary state change: deploy `HISTORY_STORAGE_ADDRESS`
         // on the Prague activation block. Idempotency is gated by
-        // `transitions_at_timestamp(current_ts, parent_ts)` — see `eip_2935` for the
-        // full rationale.
-        eip_2935::apply_state_changes_for_block(
+        // `transitions_at_timestamp(current_ts, parent_ts)` — see
+        // `reth_evm_ethereum::hardfork::eip_2935` for the full rationale.
+        reth_evm_ethereum::hardfork::eip_2935::apply_state_changes_for_block(
             &mut *executor,
             &self.chain_spec,
             ordered_block.timestamp_us / 1_000_000,
             parent_header.timestamp,
             block_number,
-        );
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
 
         let is_alpha_active = self.chain_spec.gravity_hardforks().is_fork_active_at_timestamp(
             GravityHardfork::Alpha,

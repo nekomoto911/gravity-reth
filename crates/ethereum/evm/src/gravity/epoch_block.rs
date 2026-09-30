@@ -1,54 +1,94 @@
-//! Replay support for pre-Alpha DKG epoch-change blocks.
+//! Facts about committed Gravity blocks that replay needs and the block body alone does not show.
 //!
 //! Before the Alpha hardfork, when a block's DKG `finishTransition` emitted `NewEpoch`, the pipe
 //! executed `Blocker.onBlockStart` and then `finishTransition`, but assembled only
 //! `finishTransition` into the body. The committed state covers both calls, so replaying the body
 //! alone starts one `SYSTEM_CALLER` nonce short and fails with `nonce too high`. These blocks are
-//! published and cannot change, so RPC replay re-executes the omitted `onBlockStart`, rebuilt from
-//! chain state (see `Call::apply_pre_execution_changes`).
+//! published and cannot change, so replay re-executes the omitted `onBlockStart`, rebuilt from
+//! chain state.
 
-use alloy_consensus::{BlockHeader, Signed, Transaction, TxEnvelope, TxLegacy};
-use alloy_eips::eip2718::{Decodable2718, Encodable2718};
-use alloy_primitives::{Address, Signature, TxKind, B256, U256};
-use alloy_sol_types::SolCall;
+use alloc::{format, vec};
+use alloy_consensus::{transaction::SignerRecoverable, BlockHeader, Signed, Transaction, TxLegacy};
+use alloy_primitives::{Address, Signature, TxKind, U256};
+use alloy_sol_types::{SolCall, SolEvent};
 use reth_chainspec::{
     gravity_system_contracts::{
-        finishTransitionCall, getActiveValidatorsCall, onBlockStartCall, BLOCK_ADDR,
-        RECONFIGURATION_ADDR, SYSTEM_TXN_GAS_LIMIT, TIMESTAMP_ADDR,
+        finishTransitionCall, getActiveValidatorsCall, onBlockStartCall, NewEpochEvent, BLOCK_ADDR,
+        RECONFIGURATION_ADDR, SYSTEM_TXN_GAS_LIMIT,
     },
-    is_gravity_system_caller, EthChainSpec, GravityHardfork,
+    is_gravity_system_caller, EthChainSpec, GravityHardfork, SYSTEM_CALLER,
 };
-use reth_errors::RethError;
-use reth_primitives_traits::{Block, RecoveredBlock};
-use reth_rpc_eth_types::EthApiError;
-use reth_storage_api::StateProvider;
+use reth_ethereum_primitives::{Block, Receipt, TransactionSigned};
+use reth_evm::execute::BlockExecutionError;
+use reth_primitives_traits::SealedBlock;
 use revm::context::result::ExecutionResult;
 
-/// Returns whether `block` is a pre-Alpha DKG epoch-change block, whose body omits the
-/// `onBlockStart` the pipe executed before its `finishTransition`.
+/// What the body of a committed block says about how the pipe executed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BodyFacts {
+    /// Every transaction is from `SYSTEM_CALLER`. An epoch change drops all user transactions,
+    /// so only such a block can be an epoch-change block.
+    pub(crate) only_system_txs: bool,
+    /// See [`is_pre_alpha_dkg_epoch_block`].
+    pub(crate) is_pre_alpha_dkg_epoch_block: bool,
+}
+
+impl BodyFacts {
+    /// Reads the facts from `block`, recovering senders the way committed blocks are read:
+    /// a system transaction has no recoverable signature and counts as `SYSTEM_CALLER`.
+    ///
+    /// System transactions come first, so recovery stops at the first user transaction.
+    pub(crate) fn of<ChainSpec: EthChainSpec>(
+        chain_spec: &ChainSpec,
+        block: &SealedBlock<Block>,
+    ) -> Self {
+        let transactions = &block.body().transactions;
+        let system_prefix = transactions
+            .iter()
+            .take_while(|tx| {
+                is_gravity_system_caller(tx.recover_signer_unchecked().unwrap_or(SYSTEM_CALLER))
+            })
+            .count();
+        Self {
+            only_system_txs: system_prefix == transactions.len(),
+            is_pre_alpha_dkg_epoch_block: is_pre_alpha_dkg_epoch_block(
+                chain_spec,
+                block.header().timestamp(),
+                transactions[..system_prefix].first(),
+            ),
+        }
+    }
+}
+
+/// Returns whether a block at `timestamp` whose first system transaction is
+/// `first_system_tx` is a pre-Alpha DKG epoch-change block, whose body omits the `onBlockStart`
+/// the pipe executed before its `finishTransition`.
 ///
 /// Every other pre-Alpha body starts with `onBlockStart`, including an epoch change that
 /// `onBlockStart` itself triggers, so a body that starts with a system `finishTransition`
 /// identifies exactly these blocks without reading state.
-pub fn is_pre_alpha_dkg_epoch_block<ChainSpec, B>(
+fn is_pre_alpha_dkg_epoch_block<ChainSpec: EthChainSpec>(
     chain_spec: &ChainSpec,
-    block: &RecoveredBlock<B>,
-) -> bool
-where
-    ChainSpec: EthChainSpec,
-    B: Block,
-{
-    if chain_spec
-        .gravity_hardforks()
-        .is_fork_active_at_timestamp(GravityHardfork::Alpha, block.header().timestamp())
+    timestamp: u64,
+    first_system_tx: Option<&TransactionSigned>,
+) -> bool {
+    if chain_spec.gravity_hardforks().is_fork_active_at_timestamp(GravityHardfork::Alpha, timestamp)
     {
         return false
     }
 
-    block.transactions_recovered().next().is_some_and(|tx| {
-        is_gravity_system_caller(tx.signer()) &&
-            tx.to() == Some(RECONFIGURATION_ADDR) &&
+    first_system_tx.is_some_and(|tx| {
+        tx.to() == Some(RECONFIGURATION_ADDR) &&
             tx.input().starts_with(&finishTransitionCall::SELECTOR)
+    })
+}
+
+/// Returns whether `receipts` contain the `NewEpochEvent` of an epoch change, which is how the
+/// pipe decides a block changed the epoch.
+pub(crate) fn changes_epoch(receipts: &[Receipt]) -> bool {
+    receipts.iter().flat_map(|receipt| &receipt.logs).any(|log| {
+        log.address == RECONFIGURATION_ADDR &&
+            log.topics().first() == Some(&NewEpochEvent::SIGNATURE_HASH)
     })
 }
 
@@ -60,39 +100,24 @@ where
 pub(crate) fn active_validator_index<H: core::fmt::Debug>(
     validator: Address,
     active_validators: &ExecutionResult<H>,
-) -> Result<u64, EthApiError> {
+) -> Result<u64, BlockExecutionError> {
     let ExecutionResult::Success { output, .. } = active_validators else {
-        return Err(EthApiError::Internal(RethError::msg(format!(
+        return Err(BlockExecutionError::msg(format!(
             "getActiveValidators() failed: {active_validators:?}"
-        ))))
+        )))
     };
     getActiveValidatorsCall::abi_decode_returns(output.data())
         .map_err(|err| {
-            EthApiError::Internal(RethError::msg(format!(
-                "invalid getActiveValidators() output: {err}"
-            )))
+            BlockExecutionError::msg(format!("invalid getActiveValidators() output: {err}"))
         })?
         .into_iter()
         .find(|info| info.validator == validator)
         .map(|info| info.validatorIndex)
         .ok_or_else(|| {
-            EthApiError::Internal(RethError::msg(format!(
+            BlockExecutionError::msg(format!(
                 "block beneficiary {validator} is not an active validator"
-            )))
+            ))
         })
-}
-
-/// Returns the global time `onBlockStart` wrote, read from the state after the block.
-///
-/// `Timestamp.microseconds` is that contract's only state variable (slot 0), and nothing after
-/// `onBlockStart` in an epoch-change block writes it.
-pub(crate) fn written_timestamp_micros(
-    post_block_state: &dyn StateProvider,
-) -> Result<u64, EthApiError> {
-    let value = post_block_state.storage(TIMESTAMP_ADDR, B256::ZERO)?.unwrap_or_default();
-    u64::try_from(value).map_err(|_| {
-        EthApiError::Internal(RethError::msg(format!("Timestamp slot 0 holds non-u64 {value}")))
-    })
 }
 
 /// Builds the omitted `onBlockStart` exactly as the pipe did: an unsigned legacy transaction
@@ -100,15 +125,12 @@ pub(crate) fn written_timestamp_micros(
 ///
 /// The failed-proposer list is not recorded on chain. Every entry adds gas, and the empty list
 /// reproduces the committed state of the affected mainnet and testnet blocks.
-///
-/// RPC helpers are generic over the node's transaction type, so the transaction is encoded as an
-/// Ethereum legacy envelope and decoded into `T`.
-pub(crate) fn on_block_start_txn<T: Decodable2718>(
+pub(crate) fn on_block_start_txn(
     nonce: u64,
     base_fee: u64,
     proposer_index: u64,
     timestamp_micros: u64,
-) -> Result<T, EthApiError> {
+) -> TransactionSigned {
     let call = onBlockStartCall {
         proposerIndex: proposer_index,
         failedProposerIndices: vec![],
@@ -124,18 +146,18 @@ pub(crate) fn on_block_start_txn<T: Decodable2718>(
         input: call.abi_encode().into(),
     };
     let unsigned = Signature::new(U256::ZERO, U256::ZERO, false);
-    let encoded = TxEnvelope::Legacy(Signed::new_unhashed(tx, unsigned)).encoded_2718();
-    T::decode_2718_exact(&encoded).map_err(|err| EthApiError::Internal(RethError::other(err)))
+    TransactionSigned::Legacy(Signed::new_unhashed(tx, unsigned))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{Block as AlloyBlock, BlockBody, Header};
-    use alloy_primitives::Bytes;
+    use alloc::vec::Vec;
+    use alloy_consensus::{BlockBody, Header};
+    use alloy_primitives::{Bytes, Log, LogData};
     use reth_chainspec::{
         gravity_system_contracts::ValidatorConsensusInfo, ChainHardforks, ChainSpec, ForkCondition,
-        Hardfork, SYSTEM_CALLER,
+        Hardfork,
     };
     use revm::context::result::{HaltReason, Output, ResultGas, SuccessReason};
 
@@ -151,7 +173,7 @@ mod tests {
         }
     }
 
-    fn system_txn(nonce: u64, to: Address, input: Vec<u8>) -> TxEnvelope {
+    fn system_txn(nonce: u64, to: Address, input: Vec<u8>) -> TransactionSigned {
         let tx = TxLegacy {
             nonce,
             gas_limit: SYSTEM_TXN_GAS_LIMIT,
@@ -159,10 +181,21 @@ mod tests {
             input: input.into(),
             ..Default::default()
         };
-        TxEnvelope::Legacy(Signed::new_unhashed(tx, Signature::new(U256::ZERO, U256::ZERO, false)))
+        TransactionSigned::Legacy(Signed::new_unhashed(
+            tx,
+            Signature::new(U256::ZERO, U256::ZERO, false),
+        ))
     }
 
-    fn on_block_start() -> TxEnvelope {
+    fn user_txn(to: Address, input: Vec<u8>) -> TransactionSigned {
+        let tx = TxLegacy { to: TxKind::Call(to), input: input.into(), ..Default::default() };
+        reth_testing_utils::generators::sign_tx_with_random_key_pair(
+            &mut reth_testing_utils::generators::rng(),
+            tx.into(),
+        )
+    }
+
+    fn on_block_start() -> TransactionSigned {
         let call = onBlockStartCall {
             proposerIndex: 0,
             failedProposerIndices: vec![],
@@ -171,21 +204,19 @@ mod tests {
         system_txn(0, BLOCK_ADDR, call.abi_encode())
     }
 
-    fn finish_transition() -> TxEnvelope {
-        let call = finishTransitionCall { dkgResult: Bytes::from_static(&[0xab]) };
-        system_txn(1, RECONFIGURATION_ADDR, call.abi_encode())
+    fn finish_transition_input() -> Vec<u8> {
+        finishTransitionCall { dkgResult: Bytes::from_static(&[0xab]) }.abi_encode()
     }
 
-    fn block(
-        timestamp: u64,
-        txs: Vec<(Address, TxEnvelope)>,
-    ) -> RecoveredBlock<AlloyBlock<TxEnvelope>> {
-        let (senders, transactions) = txs.into_iter().unzip();
-        let block = AlloyBlock {
+    fn finish_transition() -> TransactionSigned {
+        system_txn(1, RECONFIGURATION_ADDR, finish_transition_input())
+    }
+
+    fn block(timestamp: u64, transactions: Vec<TransactionSigned>) -> SealedBlock<Block> {
+        SealedBlock::seal_slow(Block {
             header: Header { timestamp, ..Default::default() },
             body: BlockBody { transactions, ..Default::default() },
-        };
-        RecoveredBlock::new_unhashed(block, senders)
+        })
     }
 
     fn validator(address: Address, index: u64) -> ValidatorConsensusInfo {
@@ -211,27 +242,52 @@ mod tests {
 
     #[test]
     fn detects_pre_alpha_body_starting_with_system_finish_transition() {
-        let block = block(ALPHA_TIME - 1, vec![(SYSTEM_CALLER, finish_transition())]);
-        assert!(is_pre_alpha_dkg_epoch_block(&chain_spec(), &block));
+        let facts = BodyFacts::of(&chain_spec(), &block(ALPHA_TIME - 1, vec![finish_transition()]));
+        assert_eq!(facts, BodyFacts { only_system_txs: true, is_pre_alpha_dkg_epoch_block: true });
     }
 
     #[test]
     fn ignores_every_other_block_shape() {
         let cases = [
-            ("post-Alpha", block(ALPHA_TIME, vec![(SYSTEM_CALLER, finish_transition())])),
+            ("post-Alpha", block(ALPHA_TIME, vec![finish_transition()])),
             (
                 "body starting with onBlockStart",
+                block(ALPHA_TIME - 1, vec![on_block_start(), finish_transition()]),
+            ),
+            (
+                "non-system sender",
                 block(
                     ALPHA_TIME - 1,
-                    vec![(SYSTEM_CALLER, on_block_start()), (SYSTEM_CALLER, finish_transition())],
+                    vec![user_txn(RECONFIGURATION_ADDR, finish_transition_input())],
                 ),
             ),
-            ("non-system sender", block(ALPHA_TIME - 1, vec![(BLOCK_ADDR, finish_transition())])),
             ("empty body", block(ALPHA_TIME - 1, vec![])),
         ];
         for (label, block) in cases {
-            assert!(!is_pre_alpha_dkg_epoch_block(&chain_spec(), &block), "{label}");
+            assert!(!BodyFacts::of(&chain_spec(), &block).is_pre_alpha_dkg_epoch_block, "{label}");
         }
+    }
+
+    #[test]
+    fn only_system_txs_stops_at_the_first_user_transaction() {
+        let system_only = block(ALPHA_TIME, vec![on_block_start(), finish_transition()]);
+        assert!(BodyFacts::of(&chain_spec(), &system_only).only_system_txs);
+
+        let with_user = block(ALPHA_TIME, vec![on_block_start(), user_txn(BLOCK_ADDR, vec![])]);
+        assert!(!BodyFacts::of(&chain_spec(), &with_user).only_system_txs);
+    }
+
+    #[test]
+    fn detects_new_epoch_event_from_reconfiguration_only() {
+        let log = |address| Log {
+            address,
+            data: LogData::new_unchecked(vec![NewEpochEvent::SIGNATURE_HASH], Bytes::new()),
+        };
+        let receipt = |logs| Receipt { logs, ..Default::default() };
+
+        assert!(changes_epoch(&[receipt(vec![]), receipt(vec![log(RECONFIGURATION_ADDR)])]));
+        assert!(!changes_epoch(&[receipt(vec![log(BLOCK_ADDR)])]));
+        assert!(!changes_epoch(&[]));
     }
 
     #[test]
@@ -256,9 +312,9 @@ mod tests {
 
     #[test]
     fn builds_on_block_start_like_the_pipe() {
-        let tx: TxEnvelope = on_block_start_txn(7, 50, 3, 1_234).unwrap();
-
-        let TxEnvelope::Legacy(signed) = tx else { panic!("expected a legacy transaction") };
+        let TransactionSigned::Legacy(signed) = on_block_start_txn(7, 50, 3, 1_234) else {
+            panic!("expected a legacy transaction")
+        };
         let (tx, signature) = (signed.tx(), signed.signature());
         assert_eq!((tx.chain_id, tx.nonce, tx.gas_price), (None, 7, 50));
         assert_eq!(

@@ -126,6 +126,11 @@ where
         self.parent_timestamp
     }
 
+    /// The pipe, for the configuration reads gravity-sdk makes through it.
+    pub(crate) const fn pipe(&self) -> &PipeExecLayerApi<Storage, EthApi> {
+        &self.pipe
+    }
+
     pub(crate) async fn produce_block(&mut self, mut input: BlockInput) -> CommittedBlock {
         // Step 1: build the ordered block, delivering a pending DKG transcript if allowed.
         let delivers_transcript = self.dkg_in_progress && input.may_change_epoch;

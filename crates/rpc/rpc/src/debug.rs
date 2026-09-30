@@ -16,35 +16,29 @@ use async_trait::async_trait;
 use futures::Stream;
 use jsonrpsee::core::RpcResult;
 use parking_lot::RwLock;
-use reth_chainspec::{
-    is_gravity_system_caller, is_system_tx_gas_exempt, ChainSpecProvider, EthChainSpec,
-    EthereumHardforks,
-};
+use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_engine_primitives::ConsensusEngineEvent;
 use reth_errors::RethError;
-use reth_evm::{block::BlockExecutor, execute::Executor, ConfigureEvm, EvmEnvFor};
+use reth_evm::{block::BlockExecutor, ConfigureEvm, EvmEnvFor};
 use reth_primitives_traits::{
     Block as BlockTrait, BlockBody, BlockTy, ReceiptWithBloom, RecoveredBlock,
 };
-use reth_revm::{db::State, witness::ExecutionWitnessRecord};
 use reth_rpc_api::DebugApiServer;
 use reth_rpc_convert::RpcTxReq;
 use reth_rpc_eth_api::{
-    helpers::{pre_alpha_epoch_block::is_pre_alpha_dkg_epoch_block, EthTransactions, TraceExt},
+    helpers::{EthTransactions, TraceExt},
     FromEthApiError, FromEvmError, RpcConvert, RpcNodeCore,
 };
 use reth_rpc_eth_types::{EthApiError, StateCacheDb};
 use reth_rpc_server_types::{result::internal_rpc_err, ToRpcResult};
 use reth_storage_api::{
     BlockIdReader, BlockReaderIdExt, HashedPostStateProvider, HeaderProvider, ProviderBlock,
-    ReceiptProviderIdExt, StateProofProvider, StateProviderFactory, StateRootProvider,
-    StorageRootProvider, TransactionVariant,
+    ReceiptProviderIdExt, StateProviderFactory, StateRootProvider, StorageRootProvider,
+    TransactionVariant,
 };
 use reth_tasks::{pool::BlockingTaskGuard, Runtime};
 use reth_trie_common::{updates::TrieUpdates, HashedPostState, HashedStorage};
-use revm::{
-    context::Block, database::states::bundle_state::BundleRetention, Database, DatabaseCommit,
-};
+use revm::{database::states::bundle_state::BundleRetention, Database, DatabaseCommit};
 use revm_inspectors::tracing::{DebugInspector, TransactionContext};
 use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, sync::Arc};
@@ -113,44 +107,46 @@ where
     }
 
     /// Trace the entire block asynchronously
+    ///
+    /// `chain_block` says whether `block` is a committed block read from the chain, replayed with
+    /// the chain's block-level steps, or any other block, executed with only Ethereum's
+    /// block-level steps (see [`ConfigureEvm::chain_block_mode`]).
     async fn trace_block(
         &self,
         block: Arc<RecoveredBlock<ProviderBlock<Eth::Provider>>>,
         evm_env: EvmEnvFor<Eth::Evm>,
         opts: GethDebugTracingOptions,
+        chain_block: bool,
     ) -> Result<Vec<TraceResult>, Eth::Error> {
         self.eth_api()
             .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
                 let mut results = Vec::with_capacity(block.body().transactions().len());
 
-                eth_api.apply_pre_execution_changes(&block, &mut db)?;
-
-                // Gravity Alpha (system-tx gas-exempt) RPC block-family wiring,
-                // single-tx branch. Each tx already clones `evm_env` per-iteration
-                // (so this loop is naturally per-tx cfg-isolated); we just toggle
-                // the disables on the clone for txs whose recovered sender ==
-                // SYSTEM_CALLER, gated on the replayed block's timestamp.
-                let exempt_fork_active = is_system_tx_gas_exempt(
-                    eth_api.provider().chain_spec().as_ref(),
-                    evm_env.block_env.timestamp().saturating_to::<u64>(),
-                );
+                if chain_block {
+                    eth_api.apply_pre_execution_changes(&block, &mut db)?;
+                } else {
+                    eth_api
+                        .evm_config()
+                        .executor_for_block(&mut db, block.sealed_block())
+                        .map_err(RethError::other)
+                        .map_err(Eth::Error::from_eth_err)?
+                        .apply_pre_execution_changes()
+                        .map_err(Eth::Error::from_eth_err)?;
+                }
 
                 let mut transactions = block.transactions_recovered().enumerate().peekable();
                 let mut inspector = DebugInspector::new(opts).map_err(Eth::Error::from_eth_err)?;
                 while let Some((index, tx)) = transactions.next() {
                     let tx_hash = *tx.tx_hash();
-                    let tx_sender_is_system_caller = is_gravity_system_caller(tx.signer());
-
-                    let mut per_tx_evm_env = evm_env.clone();
-                    if exempt_fork_active && tx_sender_is_system_caller {
-                        per_tx_evm_env.cfg_env.disable_base_fee = true;
-                        per_tx_evm_env.cfg_env.disable_balance_check = true;
-                    }
 
                     let tx_env = eth_api.evm_config().tx_env(tx);
 
-                    let res =
-                        eth_api.inspect(&mut db, per_tx_evm_env, tx_env.clone(), &mut inspector)?;
+                    let res = eth_api.inspect(
+                        &mut db,
+                        evm_env.clone(),
+                        tx_env.clone(),
+                        &mut inspector,
+                    )?;
                     let result = inspector
                         .get_result(
                             Some(TransactionContext {
@@ -209,7 +205,8 @@ where
             }
             .map_err(Eth::Error::from_eth_err)?;
 
-        self.trace_block(Arc::new(block.into_recovered_with_signers(senders)), evm_env, opts).await
+        self.trace_block(Arc::new(block.into_recovered_with_signers(senders)), evm_env, opts, false)
+            .await
     }
 
     /// Replays a block and returns the trace of each transaction.
@@ -225,7 +222,7 @@ where
             .ok_or(EthApiError::HeaderNotFound(block_id))?;
         let evm_env = self.eth_api().evm_env_for_header(block.sealed_block().sealed_header())?;
 
-        self.trace_block(block, evm_env, opts).await
+        self.trace_block(block, evm_env, opts, true).await
     }
 
     /// Trace the transaction according to the provided options.
@@ -266,31 +263,9 @@ where
 
                 let tx_env = eth_api.evm_config().tx_env(&tx);
 
-                // Gravity Alpha (system-tx gas-exempt) single-tx-family wiring
-                // for the *target* tx. `replay_transactions_until` above toggles
-                // the cfg for pre-target replay txs internally, but the target
-                // tx trace uses `evm_env` unmodified — so a post-Alpha system tx
-                // (`gas_price = 0` vs `basefee > 0`) would fail with
-                // `GasPriceLessThanBasefee`. Mirrors the parity-namespace path
-                // in `spawn_trace_transaction_in_block_with_inspector`
-                // (`crates/rpc/rpc-eth-api/src/helpers/trace.rs`).
-                let mut target_evm_env = evm_env.clone();
-                if is_system_tx_gas_exempt(
-                    eth_api.provider().chain_spec().as_ref(),
-                    target_evm_env.block_env.timestamp().saturating_to::<u64>(),
-                ) && is_gravity_system_caller(tx.signer())
-                {
-                    target_evm_env.cfg_env.disable_base_fee = true;
-                    target_evm_env.cfg_env.disable_balance_check = true;
-                }
-
                 let mut inspector = DebugInspector::new(opts).map_err(Eth::Error::from_eth_err)?;
-                let res = eth_api.inspect(
-                    &mut db,
-                    target_evm_env.clone(),
-                    tx_env.clone(),
-                    &mut inspector,
-                )?;
+                let res =
+                    eth_api.inspect(&mut db, evm_env.clone(), tx_env.clone(), &mut inspector)?;
                 let trace = inspector
                     .get_result(
                         Some(TransactionContext {
@@ -299,7 +274,7 @@ where
                             tx_hash: Some(*tx.tx_hash()),
                         }),
                         &tx_env,
-                        &target_evm_env.block_env,
+                        &evm_env.block_env,
                         &res,
                         &mut db,
                     )
@@ -570,72 +545,18 @@ where
     }
 
     /// Generates an execution witness, using the given recovered block.
+    ///
+    /// Gravity: unsupported for every block. The randomness-by-height precompile reads headers
+    /// from the node's database, which a witness cannot capture, so a witness would not
+    /// reproduce the block's execution offline.
     pub async fn debug_execution_witness_for_block(
         &self,
-        block: Arc<RecoveredBlock<ProviderBlock<Eth::Provider>>>,
+        _block: Arc<RecoveredBlock<ProviderBlock<Eth::Provider>>>,
     ) -> Result<ExecutionWitness, Eth::Error> {
-        // The witness comes from re-executing the body as a standalone block, which cannot
-        // include the `onBlockStart` such a block executed outside its body.
-        if is_pre_alpha_dkg_epoch_block(self.provider().chain_spec().as_ref(), &block) {
-            return Err(Eth::Error::from_eth_err(EthApiError::Unsupported(
-                "execution witness is unavailable for a pre-Alpha DKG epoch-change block: its \
-                 body omits the executed onBlockStart metadata transaction",
-            )))
-        }
-
-        let block_number = block.header().number();
-
-        let (mut exec_witness, lowest_block_number) = self
-            .eth_api()
-            .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
-                let block_executor = eth_api.evm_config().executor(&mut db);
-
-                let mut witness_record = ExecutionWitnessRecord::default();
-
-                let _ = block_executor
-                    .execute_with_state_closure(&block, |statedb: &State<_>| {
-                        witness_record.record_executed_state(statedb);
-                    })
-                    .map_err(|err| EthApiError::Internal(err.into()))?;
-
-                let ExecutionWitnessRecord { hashed_state, codes, keys, lowest_block_number } =
-                    witness_record;
-
-                let state = db
-                    .database
-                    .0
-                    .witness(Default::default(), hashed_state)
-                    .map_err(EthApiError::from)?;
-                Ok((
-                    ExecutionWitness { state, codes, keys, ..Default::default() },
-                    lowest_block_number,
-                ))
-            })
-            .await?;
-
-        let smallest = match lowest_block_number {
-            Some(smallest) => smallest,
-            None => {
-                // Return only the parent header, if there were no calls to the
-                // BLOCKHASH opcode.
-                block_number.saturating_sub(1)
-            }
-        };
-
-        let range = smallest..block_number;
-        exec_witness.headers = self
-            .provider()
-            .headers_range(range)
-            .map_err(EthApiError::from)?
-            .into_iter()
-            .map(|header| {
-                let mut serialized_header = Vec::new();
-                header.encode(&mut serialized_header);
-                serialized_header.into()
-            })
-            .collect();
-
-        Ok(exec_witness)
+        Err(Eth::Error::from_eth_err(EthApiError::Unsupported(
+            "execution witnesses are unsupported on Gravity: the randomness-by-height precompile \
+             reads headers a witness cannot capture",
+        )))
     }
 
     /// Returns account information, including the storage root, after replaying the block through
@@ -1250,7 +1171,7 @@ where
             .to_rpc_result()?;
 
         let opts = opts.map(|o| o.tracing_options).unwrap_or_default();
-        self.trace_block(entry.block.clone(), evm_env, opts).await.map_err(Into::into)
+        self.trace_block(entry.block.clone(), evm_env, opts, false).await.map_err(Into::into)
     }
 
     /// Handler for `debug_setFailpoint`

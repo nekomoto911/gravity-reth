@@ -59,6 +59,7 @@ use {
 };
 
 pub use alloy_evm::EthEvm;
+pub use gravity::{GravityChainReader, GravityEvmConfig};
 
 mod config;
 use alloy_evm::eth::spec::EthExecutorSpec;
@@ -75,6 +76,7 @@ pub mod execute {
     pub type EthExecutorProvider = EthEvmConfig;
 }
 
+pub mod gravity;
 pub mod hardfork;
 pub mod parallel_execute;
 pub mod skipped_transaction;
@@ -84,17 +86,16 @@ pub mod skipped_transaction;
 // ============================================================================
 //
 // Both the canonical execution layer (this crate's serial `transact_system_txn`
-// + grevm `parallel_execute.rs::transact_system_txn`) and every RPC replay path
-// that re-executes a persisted system tx (sender == `SYSTEM_CALLER`) MUST gate
+// + grevm `parallel_execute.rs::transact_system_txn`) and replay of a persisted
+// system tx (sender == `SYSTEM_CALLER`, through `gravity::GravityEvm`) MUST gate
 // the cfg-side fee/balance disables on the SAME predicate, queried against the
 // timestamp of the block being executed/replayed. Any drift between callsites
 // forks state root on system-tx blocks.
 //
 // The predicate itself (`is_system_tx_gas_exempt`) is defined in `reth-chainspec`
 // alongside `SYSTEM_CALLER`/`is_gravity_system_caller`, so every callsite (this
-// crate's serial + grevm twins, the pipe layer's system-tx construction, and all
-// RPC replay paths in `reth-rpc-eth-api` / `reth-rpc`) reuses a single function
-// without crate-edge gymnastics.
+// crate's serial + grevm twins and `GravityEvm`, and the pipe layer's system-tx
+// construction) reuses a single function without crate-edge gymnastics.
 
 pub use reth_chainspec::{is_gravity_system_caller, is_system_tx_gas_exempt, SYSTEM_CALLER};
 

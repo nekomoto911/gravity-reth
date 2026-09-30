@@ -122,6 +122,28 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends ripgrep
           bash scripts/check-gravity-invariants.sh
+      - name: Run the gravity pipe hardfork-timeline integration test
+        # `gravity_pipe` (`tests/gravity_pipe/`) walks one node from mainnet
+        # genesis through Prague, Alpha, Beta and Gamma, runs every Gravity
+        # pipe scenario on the way, and checks that each RPC replay endpoint
+        # reproduces every committed block (see
+        # `crates/pipe-exec-layer-ext-v2/execute/tests/HARDFORK_TESTING.md`).
+        #
+        # `--test <name>` is required (vs. just `-E 'binary(...)'`) because
+        # nextest's filterset only filters at *run* time — without `--test`,
+        # `-p <crate>` still tries to compile every integration binary in this
+        # crate. `--test` keeps this job focused on the intended binaries.
+        #
+        # Gravity pipe test binaries once compiled locally but were silently
+        # skipped here, so latent regressions went unnoticed. Invariant 9 in
+        # `scripts/check-gravity-invariants.sh` pins this allowlist: every
+        # `gravity_*` test binary of the crate must either be wired here or be
+        # listed in the invariant's `KNOWN_UNWIRED_TESTS` set with a reason.
+        run: |
+          cargo nextest run \
+            --locked \
+            -p reth-pipe-exec-layer-ext-v2 \
+            --test gravity_pipe
 
   integration-success:
     name: integration success

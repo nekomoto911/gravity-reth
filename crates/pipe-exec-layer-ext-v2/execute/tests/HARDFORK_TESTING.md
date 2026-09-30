@@ -13,7 +13,8 @@ genesis → Prague → Alpha → Beta → Gamma
 
 A mock consensus layer builds ordered blocks the way gravity-sdk does and pushes them through
 `PipeExecLayerApi`. Every block is executed by the pipe (grevm), committed and persisted before
-the next one is built. Along the way:
+the next one is built. The node is assembled with `EthereumNode::gravity_components()`, as the
+gravity-sdk node is, so its RPC re-executes blocks with `GravityEvmConfig`. Along the way:
 
 - each hardfork module puts its scenario transactions into the blocks before, at and after its
   activation, and asserts what the committed blocks show;
@@ -34,6 +35,7 @@ timeline, and the test fails once at the end with every one of them.
 | `gravity_pipe/report.rs` | `MismatchReport`: collects replay and scenario mismatches, fails the test at the end |
 | `gravity_pipe/rpc.rs` | Blocking JSON-RPC client for the node's HTTP endpoint |
 | `gravity_pipe/replay/` | The replay check, one module per endpoint class |
+| `gravity_pipe/config_reads.rs` | gravity-sdk's configuration reads through the pipe, checked on every epoch-change block |
 | `gravity_pipe/hardfork/mod.rs` | `Scenarios`: dispatches every block to the scenario modules |
 | `gravity_pipe/hardfork/base.rs` | Scenarios that do not depend on a hardfork |
 | `gravity_pipe/hardfork/{prague,alpha,beta,gamma}.rs` | One module per hardfork (`alpha/` holds Alpha's mid-block scenario; `gamma.rs` has no scenarios yet) |
@@ -91,6 +93,11 @@ which block that is:
   block changes the epoch exactly when it carries a transcript, and that no epoch is skipped.
 - On the first epoch change, the test also pushes a block of the old epoch and asserts that the
   pipe discards it.
+- On every epoch change, the test reads every configuration the pipe serves gravity-sdk
+  (`ConfigStorage`, `eth_call`s from `SYSTEM_CALLER` to the system contracts) as of that block.
+  Each reader must return a value and the epoch must match. The two JWK readers drop a failed
+  call's entries instead of failing, so they must list the bridge oracle source with the nonce
+  the oracle state reader returns. Failures go to the report.
 
 The phase lengths in `FORK_OFFSETS` leave room for one epoch interval plus a few slow blocks in
 every phase. Enlarge them when scenarios need more blocks, and keep one run under about 10 minutes.
@@ -183,11 +190,11 @@ class of endpoint.
 
 ```bash
 cargo test -p reth-pipe-exec-layer-ext-v2 --test gravity_pipe -- --nocapture
-# or:
+# or, as CI does:
 cargo nextest run -p reth-pipe-exec-layer-ext-v2 --test gravity_pipe
 ```
 
 The test clears its data directory (`crates/pipe-exec-layer-ext-v2/execute/data/gravity_pipe`)
-before starting, so no manual cleanup is needed. `.config/nextest.toml` gives it a 10-minute
-ceiling and no retries. It is not run in CI yet: it fails until the RPC replay fixes for #441 land
-(the mismatches are inventoried in #449).
+before starting, so no manual cleanup is needed. CI runs it in the `gravity-pipe-test` job of
+`.github/workflows/integration.yml`; `.config/nextest.toml` gives it a 10-minute ceiling and no
+retries.

@@ -172,7 +172,9 @@ where
             blocks.push(block);
         }
 
-        let outcome = self.evm_config().executor(db).execute_batch(&blocks).map_err(
+        // Committed blocks: replay them with the chain's block-level steps.
+        let evm_config = self.evm_config().chain_block_mode();
+        let outcome = evm_config.executor(db).execute_batch(&blocks).map_err(
             |e: reth_evm::execute::BlockExecutionError| {
                 EthApiError::Internal(reth_errors::RethError::Other(e.into()))
             },

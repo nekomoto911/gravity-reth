@@ -10,6 +10,7 @@
 //! reproduce the committed result; differences are collected and fail the test once the
 //! timeline is done.
 
+mod config_reads;
 mod hardfork;
 mod node;
 mod replay;
@@ -55,7 +56,7 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
     // Step 1: launch reth and attach the pipe execution layer at genesis.
     let handle = builder
         .with_types_and_provider::<EthereumNode, BlockchainProvider<_>>()
-        .with_components(EthereumNode::components())
+        .with_components(EthereumNode::gravity_components())
         .with_add_ons(EthereumAddOns::default())
         .launch_with_fn(|builder| {
             let launcher = EngineNodeLauncher::new(
@@ -138,6 +139,12 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
                 node.assert_old_epoch_block_rejected().await;
             }
             epoch_changes.push((block.number, phase));
+            config_reads::check_config_reads(
+                node.pipe(),
+                block.number,
+                block.epoch,
+                &mut report.for_block(block.number, phase),
+            );
         }
 
         // The RPC client blocks on HTTP while the node serves it from its own runtime.

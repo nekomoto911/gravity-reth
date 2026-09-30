@@ -24,6 +24,7 @@ revm = { workspace = true, features = ["optional_balance_check", "optional_no_ba
 reth-evm.workspace = true
 grevm.workspace = true
 gravity-primitives.workspace = true
+gravity-precompiles.workspace = true
 reth-storage-errors.workspace = true
 
 # Alloy
