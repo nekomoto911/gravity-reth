@@ -53,6 +53,8 @@ pub struct HistoricalStateProviderRef<'b, Provider> {
     lowest_available_blocks: LowestAvailableBlocks,
     /// Shared only by the owned provider, so repeated root calls reuse the same historical base.
     revert_cache: Option<&'b OnceLock<HashedPostState>>,
+    /// Maximum number of blocks a trie computation may revert from the state tip.
+    max_revert_window: Option<u64>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -71,6 +73,7 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
             block_number,
             lowest_available_blocks: Default::default(),
             revert_cache: None,
+            max_revert_window: None,
         }
     }
 
@@ -81,7 +84,13 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
         block_number: BlockNumber,
         lowest_available_blocks: LowestAvailableBlocks,
     ) -> Self {
-        Self { provider, block_number, lowest_available_blocks, revert_cache: None }
+        Self {
+            provider,
+            block_number,
+            lowest_available_blocks,
+            revert_cache: None,
+            max_revert_window: None,
+        }
     }
 
     /// Lookup an account in the `AccountsHistory` table
@@ -170,6 +179,14 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
                 requested: self.block_number - 1,
                 executed: height,
             })
+        }
+        // The reverted state for the whole window is built in memory, so refuse before reading
+        // any changeset.
+        let distance = height.saturating_add(1).saturating_sub(self.block_number);
+        if let Some(max) = self.max_revert_window &&
+            distance > max
+        {
+            return Err(ProviderError::StateRevertWindowExceeded { distance, tip: height, max })
         }
         let static_files = self.provider.static_file_provider();
         let _history_guard = self
@@ -309,6 +326,13 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
         block_number: BlockNumber,
     ) -> Self {
         self.lowest_available_blocks.storage_history_block_number = Some(block_number);
+        self
+    }
+
+    /// Set the maximum number of blocks that state-root and proof requests may revert from the
+    /// state tip. `None` disables the limit.
+    pub const fn with_max_state_revert_window(mut self, max_revert_window: Option<u64>) -> Self {
+        self.max_revert_window = max_revert_window;
         self
     }
 }
@@ -640,6 +664,8 @@ pub struct HistoricalStateProvider<Provider> {
     /// Lowest blocks at which different parts of the state are available.
     lowest_available_blocks: LowestAvailableBlocks,
     revert_cache: OnceLock<HashedPostState>,
+    /// Maximum number of blocks a trie computation may revert from the state tip.
+    max_revert_window: Option<u64>,
 }
 
 impl<Provider: DBProvider + BlockNumReader> HistoricalStateProvider<Provider> {
@@ -650,6 +676,7 @@ impl<Provider: DBProvider + BlockNumReader> HistoricalStateProvider<Provider> {
             block_number,
             lowest_available_blocks: Default::default(),
             revert_cache: OnceLock::new(),
+            max_revert_window: None,
         }
     }
 
@@ -673,6 +700,13 @@ impl<Provider: DBProvider + BlockNumReader> HistoricalStateProvider<Provider> {
         self
     }
 
+    /// Set the maximum number of blocks that state-root and proof requests may revert from the
+    /// state tip. `None` disables the limit.
+    pub const fn with_max_state_revert_window(mut self, max_revert_window: Option<u64>) -> Self {
+        self.max_revert_window = max_revert_window;
+        self
+    }
+
     /// Returns a new provider that takes the `TX` as reference
     #[inline(always)]
     const fn as_ref(&self) -> HistoricalStateProviderRef<'_, Provider> {
@@ -681,6 +715,7 @@ impl<Provider: DBProvider + BlockNumReader> HistoricalStateProvider<Provider> {
             block_number: self.block_number,
             lowest_available_blocks: self.lowest_available_blocks,
             revert_cache: Some(&self.revert_cache),
+            max_revert_window: self.max_revert_window,
         }
     }
 }
@@ -743,9 +778,12 @@ mod tests {
         BlockHashReader, BlockNumReader, ChangeSetReader, ChangesetRangeReader, DBProvider,
         DatabaseProviderFactory, HeaderProvider, StateProofProvider, StateWriter,
         StorageChangeSetReader, StorageRootProvider, StorageSettingsCache,
+        TryIntoHistoricalStateProvider,
     };
     use reth_storage_errors::provider::ProviderError;
-    use reth_trie::{HashedPostState, HashedStorage, TrieInput, EMPTY_ROOT_HASH};
+    use reth_trie::{
+        HashedPostState, HashedStorage, MultiProofTargets, TrieInput, EMPTY_ROOT_HASH,
+    };
     use reth_trie_db::nested_hash::NestedStateRoot;
 
     const ADDRESS: Address = address!("0x0000000000000000000000000000000000000001");
@@ -1331,6 +1369,134 @@ mod tests {
             &[STORAGE],
         );
         assert!(matches!(result, Err(ProviderError::StateRootMismatch(_))));
+    }
+
+    #[test]
+    fn history_v2_revert_window_caps_trie_requests_only() {
+        let factory = create_test_provider_factory();
+        let hash = keccak256(ADDRESS);
+        let slot_hash = keccak256(STORAGE);
+        let initial = Account { nonce: 1, ..Default::default() };
+        let intermediate = Account { nonce: 2, ..Default::default() };
+        let current = Account { nonce: 3, ..Default::default() };
+
+        let mut latest = HashedPostState::default();
+        latest.accounts.insert(hash, Some(current));
+        latest.storages.entry(hash).or_default().storage.insert(slot_hash, U256::from(30));
+        let provider = factory.provider_rw().unwrap();
+        let (_, updates) =
+            NestedStateRoot::new(provider.tx_ref(), None).calculate(&latest).unwrap();
+        provider.write_trie_updatesv2(&updates).unwrap();
+        provider.write_hashed_state(&latest.into_sorted()).unwrap();
+        provider.tx_ref().put::<tables::CanonicalHeaders>(3, B256::with_last_byte(3)).unwrap();
+        set_complete_height(provider.tx_ref(), 3);
+        for (block, info, value) in [(2, initial, 10), (3, intermediate, 20)] {
+            provider
+                .tx_ref()
+                .put::<tables::AccountChangeSets>(
+                    block,
+                    AccountBeforeTx { address: ADDRESS, info: Some(info) },
+                )
+                .unwrap();
+            provider
+                .tx_ref()
+                .put::<tables::StorageChangeSets>(
+                    (block, ADDRESS).into(),
+                    StorageEntry { key: STORAGE, value: U256::from(value) },
+                )
+                .unwrap();
+        }
+        provider
+            .tx_ref()
+            .put::<tables::AccountsHistory>(
+                ShardedKey { key: ADDRESS, highest_block_number: u64::MAX },
+                BlockNumberList::new([2, 3]).unwrap(),
+            )
+            .unwrap();
+        provider
+            .tx_ref()
+            .put::<tables::StoragesHistory>(
+                StorageShardedKey {
+                    address: ADDRESS,
+                    sharded_key: ShardedKey { key: STORAGE, highest_block_number: u64::MAX },
+                },
+                BlockNumberList::new([2, 3]).unwrap(),
+            )
+            .unwrap();
+        provider.commit().unwrap();
+
+        let provider = factory.provider().unwrap();
+        fn exceeded<T>(result: Result<T, ProviderError>) -> bool {
+            matches!(
+                result,
+                Err(ProviderError::StateRevertWindowExceeded { distance: 2, tip: 3, max: 1 })
+            )
+        }
+
+        // State after block 2 is one block behind the tip: within the window.
+        let within =
+            HistoricalStateProviderRef::new(&provider, 3).with_max_state_revert_window(Some(1));
+        let unlimited = HistoricalStateProviderRef::new(&provider, 3);
+        assert_eq!(
+            within.state_root(HashedPostState::default()).unwrap(),
+            unlimited.state_root(HashedPostState::default()).unwrap()
+        );
+
+        // State after block 1 is two blocks behind the tip: every trie request is refused.
+        let beyond =
+            HistoricalStateProviderRef::new(&provider, 2).with_max_state_revert_window(Some(1));
+        assert!(exceeded(beyond.revert_state_v2()));
+        assert!(exceeded(beyond.state_root(HashedPostState::default())));
+        assert!(exceeded(beyond.state_root_with_updates_v2(HashedPostState::default())));
+        assert!(exceeded(beyond.storage_root(ADDRESS, HashedStorage::default())));
+        assert!(exceeded(beyond.storage_multiproof(ADDRESS, &[STORAGE], HashedStorage::default())));
+        assert!(exceeded(beyond.proof(TrieInput::default(), ADDRESS, &[STORAGE])));
+        assert!(exceeded(beyond.multiproof(TrieInput::default(), MultiProofTargets::default())));
+
+        // Point reads use history indices and a single changeset, so the window does not apply.
+        assert_eq!(beyond.basic_account(&ADDRESS).unwrap(), Some(initial));
+        assert_eq!(beyond.storage(ADDRESS, STORAGE).unwrap(), Some(U256::from(10)));
+        drop(provider);
+
+        // The factory setting reaches read-only historical providers but not write paths.
+        let factory = factory.with_max_state_revert_window(1);
+        assert!(factory.history_by_block_number(2).unwrap().state_root(Default::default()).is_ok());
+        let beyond = factory.history_by_block_number(1).unwrap();
+        assert!(exceeded(beyond.state_root(HashedPostState::default())));
+        assert_eq!(beyond.basic_account(&ADDRESS).unwrap(), Some(initial));
+        drop(beyond);
+        let rw = crate::DatabaseProvider::from(factory.provider_rw().unwrap());
+        assert!(rw
+            .try_into_history_at_block(1)
+            .unwrap()
+            .state_root(HashedPostState::default())
+            .is_ok());
+    }
+
+    #[test]
+    fn history_v2_revert_window_refuses_before_reading_changesets() {
+        let factory = create_test_provider_factory();
+        // No changeset static files exist, so any attempt to read them would fail differently.
+        factory.set_storage_settings_cache(GravityStorageSettings {
+            changesets_in_static_files: true,
+        });
+        let provider = factory.provider_rw().unwrap();
+        set_complete_height(provider.tx_ref(), 5);
+        provider.commit().unwrap();
+
+        let provider = factory.provider().unwrap();
+        assert!(matches!(
+            HistoricalStateProviderRef::new(&provider, 1)
+                .with_max_state_revert_window(Some(2))
+                .revert_state_v2(),
+            Err(ProviderError::StateRevertWindowExceeded { distance: 5, tip: 5, max: 2 })
+        ));
+        assert!(matches!(
+            HistoricalStateProviderRef::new(&provider, 1)
+                .with_max_state_revert_window(Some(5))
+                .revert_state_v2(),
+            Err(ProviderError::HeaderNotFound(_))
+        ));
     }
 
     #[test]

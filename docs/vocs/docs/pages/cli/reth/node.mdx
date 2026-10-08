@@ -421,7 +421,7 @@ RPC:
           Set the maximum RPC response payload size for both HTTP and WS in megabytes
 
           [default: 160]
-          [aliases: --rpc.returndata.limit]
+          [alias: --rpc.returndata.limit]
 
       --rpc.max-subscriptions-per-connection <RPC_MAX_SUBSCRIPTIONS_PER_CONNECTION>
           Set the maximum concurrent subscriptions per connection
@@ -491,6 +491,13 @@ RPC:
           The maximum proof window for historical proof generation. This value allows for generating historical proofs up to configured number of blocks from current tip (up to `tip - window`)
 
           [default: 0]
+
+      --rpc.max-state-revert-window <BLOCKS_COUNT>
+          Maximum number of blocks between the requested block and the tip for requests that must revert historical state to compute a state root or proof (`debug_intermediateRoots`, `debug_stateRootWithUpdates`, `debug_accountAt`, `eth_getProof`, `eth_simulateV1` with state roots).
+
+          Each such request loads the state changed in the window into memory, so memory use scales with the amount of state changed in the window; the block count is only an approximation of that cost.
+
+          [default: 1000000]
 
       --rpc.proof-permits <COUNT>
           Maximum number of concurrent getproof requests

@@ -510,6 +510,10 @@ impl From<reth_errors::ProviderError> for EthApiError {
             ProviderError::FinalizedBlockNotFound => Self::HeaderNotFound(BlockId::finalized()),
             ProviderError::SafeBlockNotFound => Self::HeaderNotFound(BlockId::safe()),
             ProviderError::BlockExpired { .. } => Self::PrunedHistoryUnavailable,
+            // A configured request limit, not a node fault.
+            err @ ProviderError::StateRevertWindowExceeded { .. } => {
+                Self::InvalidParams(err.to_string())
+            }
             err => Self::Internal(err.into()),
         }
     }
@@ -1206,6 +1210,22 @@ mod tests {
         let err: jsonrpsee_types::error::ErrorObject<'static> =
             EthApiError::ReceiptsNotFound(BlockId::earliest()).into();
         assert_eq!(err.message(), "block not found: earliest");
+    }
+
+    #[test]
+    fn state_revert_window_is_invalid_params() {
+        let err: jsonrpsee_types::error::ErrorObject<'static> =
+            EthApiError::from(reth_errors::ProviderError::StateRevertWindowExceeded {
+                distance: 1_500_000,
+                tip: 2_000_000,
+                max: 1_000_000,
+            })
+            .into();
+        assert_eq!(err.code(), jsonrpsee_types::error::INVALID_PARAMS_CODE);
+        assert_eq!(
+            err.message(),
+            "requested state is 1500000 blocks behind the state tip #2000000, exceeding the maximum state revert window of 1000000 blocks"
+        );
     }
 
     #[test]

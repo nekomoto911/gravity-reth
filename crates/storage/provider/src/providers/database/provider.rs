@@ -151,12 +151,21 @@ pub struct DatabaseProvider<TX, N: NodeTypes> {
     storage: Arc<N::Storage>,
     /// Cached storage layout settings, shared with the provider factory.
     storage_settings: Arc<RwLock<GravityStorageSettings>>,
+    /// Maximum number of blocks historical state providers may revert for trie computations.
+    max_state_revert_window: Option<u64>,
 }
 
 impl<TX, N: NodeTypes> DatabaseProvider<TX, N> {
     /// Returns reference to prune modes.
     pub const fn prune_modes_ref(&self) -> &PruneModes {
         &self.prune_modes
+    }
+
+    /// Sets the maximum number of blocks that historical state providers created from this
+    /// provider may revert for state-root and proof computations. `None` disables the limit.
+    pub const fn with_max_state_revert_window(mut self, window: Option<u64>) -> Self {
+        self.max_state_revert_window = window;
+        self
     }
 }
 
@@ -189,7 +198,8 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
         let storage_history_prune_checkpoint =
             self.get_prune_checkpoint(PruneSegment::StorageHistory)?;
 
-        let mut state_provider = HistoricalStateProviderRef::new(self, block_number);
+        let mut state_provider = HistoricalStateProviderRef::new(self, block_number)
+            .with_max_state_revert_window(self.max_state_revert_window);
 
         // If we pruned account or storage history, we can't return state on every historical block.
         // Instead, we should cap it at the latest prune checkpoint for corresponding prune segment.
@@ -257,7 +267,15 @@ impl<TX: DbTxMut, N: NodeTypes> DatabaseProvider<TX, N> {
         storage: Arc<N::Storage>,
         storage_settings: Arc<RwLock<GravityStorageSettings>>,
     ) -> Self {
-        Self { tx, chain_spec, static_file_provider, prune_modes, storage, storage_settings }
+        Self {
+            tx,
+            chain_spec,
+            static_file_provider,
+            prune_modes,
+            storage,
+            storage_settings,
+            max_state_revert_window: None,
+        }
     }
 }
 
@@ -452,7 +470,9 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> TryIntoHistoricalStateProvider
         let storage_history_prune_checkpoint =
             self.get_prune_checkpoint(PruneSegment::StorageHistory)?;
 
-        let mut state_provider = HistoricalStateProvider::new(self, block_number);
+        let max_state_revert_window = self.max_state_revert_window;
+        let mut state_provider = HistoricalStateProvider::new(self, block_number)
+            .with_max_state_revert_window(max_state_revert_window);
 
         // If we pruned account or storage history, we can't return state on every historical block.
         // Instead, we should cap it at the latest prune checkpoint for corresponding prune segment.
@@ -586,7 +606,15 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
         storage: Arc<N::Storage>,
         storage_settings: Arc<RwLock<GravityStorageSettings>>,
     ) -> Self {
-        Self { tx, chain_spec, static_file_provider, prune_modes, storage, storage_settings }
+        Self {
+            tx,
+            chain_spec,
+            static_file_provider,
+            prune_modes,
+            storage,
+            storage_settings,
+            max_state_revert_window: None,
+        }
     }
 
     /// Consume `DbTx` or `DbTxMut`.

@@ -113,6 +113,16 @@ pub enum ProviderError {
         /// The latest executed block number.
         executed: BlockNumber,
     },
+    /// Reverting state to the requested block would exceed the configured revert window.
+    #[error("requested state is {distance} blocks behind the state tip #{tip}, exceeding the maximum state revert window of {max} blocks")]
+    StateRevertWindowExceeded {
+        /// Number of blocks that would have to be reverted.
+        distance: u64,
+        /// The block number of the state tip.
+        tip: BlockNumber,
+        /// The configured maximum revert window.
+        max: u64,
+    },
     /// Block data is not available because history has expired.
     ///
     /// The requested block number is below the earliest available block.

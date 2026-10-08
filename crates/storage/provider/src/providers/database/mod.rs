@@ -76,6 +76,9 @@ pub struct ProviderFactory<N: NodeTypesWithDB> {
     storage: Arc<N::Storage>,
     /// Cached storage layout settings, loaded from the metadata table at construction.
     storage_settings: Arc<RwLock<GravityStorageSettings>>,
+    /// Maximum number of blocks read-only historical state providers may revert for trie
+    /// computations. `None` disables the limit.
+    max_state_revert_window: Option<u64>,
 }
 
 impl<N: NodeTypes> ProviderFactory<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>> {
@@ -120,6 +123,7 @@ impl<N: NodeTypesWithDB> ProviderFactory<N> {
             prune_modes: PruneModes::none(),
             storage: Default::default(),
             storage_settings,
+            max_state_revert_window: None,
         }
     }
 
@@ -132,6 +136,16 @@ impl<N: NodeTypesWithDB> ProviderFactory<N> {
     /// Sets the pruning configuration for an existing [`ProviderFactory`].
     pub fn with_prune_modes(mut self, prune_modes: PruneModes) -> Self {
         self.prune_modes = prune_modes;
+        self
+    }
+
+    /// Caps how many blocks historical state providers from read-only providers may revert from
+    /// the state tip when computing state roots or proofs. Reverting builds the state changed in
+    /// the window in memory, so an unbounded distance can exhaust memory.
+    ///
+    /// Read-write providers are left unlimited so that write paths are never refused.
+    pub const fn with_max_state_revert_window(mut self, window: u64) -> Self {
+        self.max_state_revert_window = Some(window);
         self
     }
 
@@ -165,6 +179,7 @@ impl<N: NodeTypesWithDB<DB = Arc<DatabaseEnv>>> ProviderFactory<N> {
             prune_modes: PruneModes::none(),
             storage: Default::default(),
             storage_settings,
+            max_state_revert_window: None,
         })
     }
 }
@@ -185,7 +200,8 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
             self.prune_modes.clone(),
             self.storage.clone(),
             self.storage_settings.clone(),
-        ))
+        )
+        .with_max_state_revert_window(self.max_state_revert_window))
     }
 
     /// Returns a provider with a created `DbTxMut` inside, which allows fetching and updating
@@ -256,7 +272,8 @@ impl<N: ProviderNodeTypes> DatabaseProviderFactory for ProviderFactory<N> {
             self.prune_modes.clone(),
             self.storage.clone(),
             self.storage_settings.clone(),
-        ))
+        )
+        .with_max_state_revert_window(self.max_state_revert_window))
     }
 
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW> {
@@ -660,6 +677,7 @@ where
             prune_modes,
             storage,
             storage_settings: _,
+            max_state_revert_window,
         } = self;
         f.debug_struct("ProviderFactory")
             .field("db", &db)
@@ -667,6 +685,7 @@ where
             .field("static_file_provider", &static_file_provider)
             .field("prune_modes", &prune_modes)
             .field("storage", &storage)
+            .field("max_state_revert_window", &max_state_revert_window)
             .finish()
     }
 }
@@ -680,6 +699,7 @@ impl<N: NodeTypesWithDB> Clone for ProviderFactory<N> {
             prune_modes: self.prune_modes.clone(),
             storage: self.storage.clone(),
             storage_settings: self.storage_settings.clone(),
+            max_state_revert_window: self.max_state_revert_window,
         }
     }
 }

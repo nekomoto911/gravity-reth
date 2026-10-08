@@ -482,6 +482,7 @@ where
             StaticFileProvider::read_write(self.data_dir().static_files())?,
         )
         .with_prune_modes(self.prune_modes())
+        .with_max_state_revert_window(self.node_config().rpc.rpc_max_state_revert_window)
         .with_static_files_metrics();
 
         let has_receipt_pruning = self.toml_config().prune.has_receipts_pruning();

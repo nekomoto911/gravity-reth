@@ -61,6 +61,9 @@ pub const DEFAULT_MAX_STORAGE_VALUES_SLOTS: usize = 1024;
 /// The default eth historical proof window.
 pub const DEFAULT_ETH_PROOF_WINDOW: u64 = 0;
 
+/// The default maximum number of blocks a historical state-root or proof request may revert.
+pub const DEFAULT_MAX_STATE_REVERT_WINDOW: u64 = 1_000_000;
+
 /// The default eth tx fee cap is 1 ETH
 pub const DEFAULT_TX_FEE_CAP_WEI: u128 = 1_000_000_000_000_000_000u128;
 

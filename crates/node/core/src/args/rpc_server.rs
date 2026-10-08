@@ -87,6 +87,7 @@ pub struct DefaultRpcServerArgs {
     rpc_max_simulate_blocks: u64,
     rpc_compute_state_root_for_eth_simulate: bool,
     rpc_eth_proof_window: u64,
+    rpc_max_state_revert_window: u64,
     rpc_proof_permits: usize,
     rpc_pending_block: PendingBlockKind,
     rpc_forwarder: Option<Url>,
@@ -329,6 +330,12 @@ impl DefaultRpcServerArgs {
         self
     }
 
+    /// Set the default maximum state revert window
+    pub const fn with_rpc_max_state_revert_window(mut self, v: u64) -> Self {
+        self.rpc_max_state_revert_window = v;
+        self
+    }
+
     /// Set the default proof permits
     pub const fn with_rpc_proof_permits(mut self, v: usize) -> Self {
         self.rpc_proof_permits = v;
@@ -412,6 +419,7 @@ impl Default for DefaultRpcServerArgs {
             rpc_max_simulate_blocks: constants::DEFAULT_MAX_SIMULATE_BLOCKS,
             rpc_compute_state_root_for_eth_simulate: false,
             rpc_eth_proof_window: constants::DEFAULT_ETH_PROOF_WINDOW,
+            rpc_max_state_revert_window: constants::DEFAULT_MAX_STATE_REVERT_WINDOW,
             rpc_proof_permits: constants::DEFAULT_PROOF_PERMITS,
             rpc_pending_block: PendingBlockKind::Full,
             rpc_forwarder: None,
@@ -631,6 +639,21 @@ pub struct RpcServerArgs {
         value_parser = RangedU64ValueParser::<u64>::new().range(..=constants::MAX_ETH_PROOF_WINDOW)
     )]
     pub rpc_eth_proof_window: u64,
+
+    /// Maximum number of blocks between the requested block and the tip for requests that must
+    /// revert historical state to compute a state root or proof (`debug_intermediateRoots`,
+    /// `debug_stateRootWithUpdates`, `debug_accountAt`, `eth_getProof`, `eth_simulateV1` with
+    /// state roots).
+    ///
+    /// Each such request loads the state changed in the window into memory, so memory use scales
+    /// with the amount of state changed in the window; the block count is only an approximation
+    /// of that cost.
+    #[arg(
+        long = "rpc.max-state-revert-window",
+        value_name = "BLOCKS_COUNT",
+        default_value_t = DefaultRpcServerArgs::get_global().rpc_max_state_revert_window
+    )]
+    pub rpc_max_state_revert_window: u64,
 
     /// Maximum number of concurrent getproof requests.
     #[arg(long = "rpc.proof-permits", alias = "rpc-proof-permits", value_name = "COUNT", default_value_t = DefaultRpcServerArgs::get_global().rpc_proof_permits)]
@@ -872,6 +895,7 @@ impl Default for RpcServerArgs {
             rpc_max_simulate_blocks,
             rpc_compute_state_root_for_eth_simulate,
             rpc_eth_proof_window,
+            rpc_max_state_revert_window,
             rpc_proof_permits,
             rpc_pending_block,
             rpc_forwarder,
@@ -918,6 +942,7 @@ impl Default for RpcServerArgs {
             rpc_max_simulate_blocks,
             rpc_compute_state_root_for_eth_simulate,
             rpc_eth_proof_window,
+            rpc_max_state_revert_window,
             rpc_proof_permits,
             rpc_pending_block,
             rpc_forwarder,
@@ -1096,6 +1121,7 @@ mod tests {
             rpc_max_simulate_blocks: 256,
             rpc_compute_state_root_for_eth_simulate: false,
             rpc_eth_proof_window: 100_000,
+            rpc_max_state_revert_window: 500_000,
             rpc_proof_permits: 16,
             rpc_pending_block: PendingBlockKind::Full,
             rpc_forwarder: Some("http://localhost:8545".parse().unwrap()),
@@ -1183,6 +1209,8 @@ mod tests {
             "256",
             "--rpc.eth-proof-window",
             "100000",
+            "--rpc.max-state-revert-window",
+            "500000",
             "--rpc.proof-permits",
             "16",
             "--rpc.pending-block",
